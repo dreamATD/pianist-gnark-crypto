@@ -2,13 +2,15 @@ package dkzg
 
 import (
 	"errors"
+	"fmt"
+	"hash"
 	"math/big"
+	"sync"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/ecc/bn254"
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
-	"github.com/consensys/gnark-crypto/ecc/bn254/fr/fft"
-	"github.com/consensys/gnark-crypto/ecc/bn254/fr/kzg"
+	fiatshamir "github.com/consensys/gnark-crypto/fiat-shamir"
 	"github.com/sunblaze-ucb/simpleMPI/mpi"
 )
 
@@ -24,9 +26,8 @@ var (
 type Digest = bn254.G1Affine
 
 type SRS struct {
-	G1     []bn254.G1Affine  // G1[i][j] = g^(L_i(\tau[0]) * \tau[1]^j)
-	G2     [3]bn254.G2Affine // G2[0] = g2, G2[1] = g2^tau[0], G2[2] = g2^tau[1]
-	kzgSRS *kzg.SRS
+	G1 []bn254.G1Affine  // G1[i][j] = g^(L_i(\tau[0]) * \tau[1]^j)
+	G2 [2]bn254.G2Affine // G2[0] = g2, G2[1] = g2^tau[0], G2[2] = g2^tau[1]
 }
 
 // eval returns p(point) where p is interpreted as a polynomial
@@ -41,29 +42,24 @@ func eval(p []fr.Element, point fr.Element) fr.Element {
 	return res
 }
 
-func lagrangeCalc(t int, x fr.Element) fr.Element {
+func lagrangeCalc(t int, tau0 fr.Element) fr.Element {
 	fieldSize := fr.Modulus()
+	m := big.NewInt(int64(mpi.WorldSize))
+	mField := new(fr.Element).SetBigInt(m)
 	multiplicativeGroupSize := new(big.Int).Sub(fieldSize, big.NewInt(1))
-	omegaPow := new(big.Int).Div(multiplicativeGroupSize, big.NewInt(int64(mpi.WorldSize)))
+	omegaPow := new(big.Int).Div(multiplicativeGroupSize, m)
 	omegaBigInt, _ := new(big.Int).SetString("19103219067921713944291392827692070036145651957329286315305642004821462161904", 10)
 	omega := *new(fr.Element).SetBigInt(omegaBigInt)
 	// BUG: side channel attack
 	omega.Exp(omega, omegaPow)
-	omegaT := *new(fr.Element).Exp(omega, big.NewInt(int64(t)))
-	omegaI := fr.One()
-	x0 := &x
-	// Lagrange Polynomial
-	lagrange := fr.One()
-	for i := 0; i < int(mpi.WorldSize); i++ {
-		if i != int(t) {
-			up := new(fr.Element).Sub(x0, &omegaI)
-			down := new(fr.Element).Sub(&omegaT, &omegaI)
-			upDivDown := new(fr.Element).Div(up, down)
-			lagrange.Mul(&lagrange, upDivDown)
-		}
-		omegaI.Mul(&omegaI, &omega)
-	}
-	return lagrange
+
+	// R_i(t) = ((tau[0]^m - 1) * omega^t) / (m * (tau[0] - omega^t))
+	var lagTau0, omegaPowT, denominator fr.Element
+	omegaPowT.Exp(omega, big.NewInt(int64(t)))
+	one := fr.One()
+	denominator.Sub(&omegaPowT, &one).Mul(&denominator, mField)
+	lagTau0.Exp(tau0, m).Sub(&lagTau0, &one).Mul(&lagTau0, &omegaPowT).Div(&lagTau0, &denominator)
+	return lagTau0
 }
 
 // NewSRS returns a new SRS using alpha as randomness source
@@ -76,13 +72,9 @@ func NewSRS(size uint64, tau []*big.Int) (*SRS, error) {
 	_, _, gen1Aff, gen2Aff := bn254.Generators()
 	t := mpi.SelfRank
 
-	//prepare lagrange polynomial
-	//L_t(\tau[0]) = \prod_{i=0, i!=t}^{n-1}(\tau[0]-omega^i)/(omega^t-omega^i)
-	// Multiplicative Generator
-
 	tau0 := new(fr.Element).SetBigInt(tau[0])
 	// Lagrange Polynomial
-	lagrange := lagrangeCalc(int(t), *tau0)
+	lagTau0 := lagrangeCalc(int(t), *tau0)
 
 	var srs SRS
 
@@ -90,16 +82,15 @@ func NewSRS(size uint64, tau []*big.Int) (*SRS, error) {
 	alpha.SetBigInt(tau[1])
 
 	srs.G2[0] = gen2Aff
-	srs.G2[1].ScalarMultiplication(&gen2Aff, tau[0])
-	srs.G2[2].ScalarMultiplication(&gen2Aff, tau[1])
+	srs.G2[1].ScalarMultiplication(&gen2Aff, tau[1])
 
 	lagBigInt := new(big.Int)
-	lagrange.ToBigIntRegular(lagBigInt)
+	lagTau0.ToBigIntRegular(lagBigInt)
 	srs.G1[0].ScalarMultiplication(&gen1Aff, lagBigInt)
 
 	alphas := make([]fr.Element, size-1)
 	alphas[0] = alpha
-	alphas[0].Mul(&alphas[0], &lagrange)
+	alphas[0].Mul(&alphas[0], &lagTau0)
 	for i := 1; i < len(alphas); i++ {
 		alphas[i].Mul(&alphas[i-1], &alpha)
 	}
@@ -108,14 +99,6 @@ func NewSRS(size uint64, tau []*big.Int) (*SRS, error) {
 	}
 	g1s := bn254.BatchScalarMultiplicationG1(&gen1Aff, alphas)
 	copy(srs.G1[1:], g1s)
-
-	// KZG SRS
-
-	kzgSRS, err := kzg.NewSRS(mpi.WorldSize, tau[0])
-	srs.kzgSRS = kzgSRS
-	if err != nil {
-		return nil, err
-	}
 	return &srs, nil
 }
 
@@ -162,35 +145,24 @@ func Commit(p []fr.Element, srs *SRS, nbTasks ...int) (Digest, error) {
 		for i := 1; i < int(mpi.WorldSize); i++ {
 			finalRes.Add(&finalRes, &subCom[i])
 		}
-		// Send the final commitment to all compute nodes
-		for i := 1; i < int(mpi.WorldSize); i++ {
-			if err := mpi.SendBytes(G1AffineToBytes(finalRes), uint64(i)); err != nil {
-				return Digest{}, err
-			}
-		}
 		return finalRes, nil
-	} else {
-		// Other nodes
-		if err := mpi.SendBytes(G1AffineToBytes(res), 0); err != nil {
-			return Digest{}, err
-		}
-		// Receive the final commitment from the root node
-		finalResBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, 0)
-		if err != nil {
-			return Digest{}, err
-		}
-		return BytesToG1Affine(finalResBytes), nil
 	}
+
+	// Other nodes
+	if err := mpi.SendBytes(G1AffineToBytes(res), 0); err != nil {
+		return Digest{}, err
+	}
+	// Only the root node returns the final commitment
+	return Digest{}, nil
 }
 
 // implements io.ReaderFrom and io.WriterTo
-type PartialOpenedProof struct {
-	// Com
-	Com Digest
-	// Proof
-	Proof bn254.G1Affine
-	// Eval Share
-	Evals []fr.Element
+type OpeningProof struct {
+	// H quotient polynomial (f(Y, X) - f(Y, alpha)) / (X - alpha)
+	H bn254.G1Affine
+
+	// ClaimedDigest purported the digest of value
+	ClaimedDigest bn254.G1Affine
 }
 
 // dividePolyByXminusA computes (f-f(a))/(x-a), in canonical basis, in regular form
@@ -220,314 +192,495 @@ New commitment is g^{F'(\tau[0])} = \Pi_{i=0}^{M-1} g^{f_i(y_0) * L_i(\tau[0])} 
 Proof that old commitment is consistent with new commitment:
 F(\tau[0], \tau[1]) - F(x, \tau[1]) / (\tau[0] - x) = h(x)
 */
-func partialOpen(p []fr.Element, y fr.Element, srs *SRS, nbTasks ...int) (PartialOpenedProof, error) {
+func Open(p []fr.Element, y fr.Element, srs *SRS, nbTasks ...int) (OpeningProof, []fr.Element, error) {
 	if len(p) == 0 || len(p) > len(srs.G1) {
-		return PartialOpenedProof{}, ErrInvalidPolynomialSize
+		return OpeningProof{}, nil, ErrInvalidPolynomialSize
 	}
 
 	// Build the next level commitment
 	// Eval at F(\tau[0], y) = \sum_{i=0}^{M-1} f_i(y) * L_i(\tau[0])
-
-	var newSlaveCom bn254.G1Affine
-	var newCom bn254.G1Affine
-
 	config := ecc.MultiExpConfig{ScalarsMont: true}
 	if len(nbTasks) > 0 {
 		config.NbTasks = nbTasks[0]
 	}
 
-	//compute f_i(y)
-	allfY := make([]fr.Element, mpi.WorldSize)
-
+	// compute f_i(y)
 	fY := eval(p, y)
 	var fYBigInt big.Int
 	fY.ToBigIntRegular(&fYBigInt)
 
-	newSlaveCom.ScalarMultiplication(&srs.G1[0], &fYBigInt)
+	// digest of f_i(y)
+	var comFY bn254.G1Affine
+	comFY.ScalarMultiplication(&srs.G1[0], &fYBigInt)
+
+	// compute H
+	_p := make([]fr.Element, len(p))
+	copy(_p, p)
+	h := dividePolyByXminusA(_p, fY, y)
+
+	_p = nil // h re-use this memory
+
+	// commit to H
+	comH, err := Commit(h, srs)
+	if err != nil {
+		return OpeningProof{}, nil, err
+	}
 
 	// Send the new commitment to the root node
 	if mpi.SelfRank == 0 {
 		// Root node
-		subCom := make([]bn254.G1Affine, mpi.WorldSize)
-		subCom[0] = newSlaveCom
+		allFY := make([]fr.Element, mpi.WorldSize)
+		allComFY := make([]bn254.G1Affine, mpi.WorldSize)
+		allComH := make([]bn254.G1Affine, mpi.WorldSize)
+		allFY[0] = fY
+		allComFY[0] = comFY
+		allComH[0] = comH
 		for i := 1; i < int(mpi.WorldSize); i++ {
-			subComBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, uint64(i))
+			fYBytes, err := mpi.ReceiveBytes(fr.Bytes, uint64(i))
 			if err != nil {
-				return PartialOpenedProof{}, err
+				return OpeningProof{}, nil, err
 			}
-			subCom[i] = BytesToG1Affine(subComBytes)
-		}
-		newCom = subCom[0]
-		for i := 1; i < int(mpi.WorldSize); i++ {
-			newCom.Add(&newCom, &subCom[i])
-		}
-		// Send the final commitment to all compute nodes
-		for i := 1; i < int(mpi.WorldSize); i++ {
-			if err := mpi.SendBytes(G1AffineToBytes(newCom), uint64(i)); err != nil {
-				return PartialOpenedProof{}, err
+			allFY[i].SetBytes(fYBytes)
+			comFyBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, uint64(i))
+			if err != nil {
+				return OpeningProof{}, nil, err
 			}
+			allComFY[i] = BytesToG1Affine(comFyBytes)
+			comHBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, uint64(i))
+			if err != nil {
+				return OpeningProof{}, nil, err
+			}
+			allComH[i] = BytesToG1Affine(comHBytes)
 		}
-	} else {
-		// Other nodes
-		if err := mpi.SendBytes(G1AffineToBytes(newSlaveCom), 0); err != nil {
-			return PartialOpenedProof{}, err
+
+		comFY = allComFY[0]
+		for i := 1; i < int(mpi.WorldSize); i++ {
+			comFY.Add(&comFY, &allComFY[i])
 		}
-		// Receive the final commitment from the root node
-		finalResBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, 0)
-		if err != nil {
-			return PartialOpenedProof{}, err
+		comH = allComH[0]
+		for i := 1; i < int(mpi.WorldSize); i++ {
+			comH.Add(&comH, &allComH[i])
 		}
-		newCom = BytesToG1Affine(finalResBytes)
+
+		return OpeningProof{
+			H:             comH,
+			ClaimedDigest: comFY,
+		}, allFY, nil
 	}
 
-	// Compute the proof
-	// F'(X, Y) = (F(X, Y) - F(X, y)) / (Y - y)
-	// F'(X, Y) = \sum_{i=0}^{M-1} (f_i(Y) * L_i(X) - f_i(y) * L_i(X)) / (Y - y)
-	// F'(X, Y) = \sum_{i=0}^{M-1} (f_i(Y) - f_i(y)) / (Y - y) * L_i(X)
-	// F'(\tau[0], \tau[1]) = \sum_{i=0}^{M-1} (f_i(\tau[1]) - f_i(y)) / (\tau[1] - y) * L_i(\tau[0])
-	// Let h(Y) = (f_i(Y) - f_i(y)) / (Y - y) = \sum_{j=0}^{N-2} h_j * Y^j
-	// F'(\tau[0], \tau[1]) = \sum_{i=0}^{M-1} \sum_{j=0}^{N-2} h_j * \tau[1]^j * L_i(\tau[0])
-	// g^{F'(\tau[0], \tau[1])} = \Pi_{i=0}^{M-1} \Pi_{j=0}^{N-2} g^{h_j * \tau[1]^j * L_i(\tau[0])}
-	// g^{F'(\tau[0], \tau[1])} = \Pi_{i=0}^{M-1} \Pi_{i=0}^{N-2} (G1[i][j])^{h_i}
-
-	// Compute h_i
-	_p := make([]fr.Element, len(p))
-	copy(_p, p)
-	h := dividePolyByXminusA(_p, fY, y)
-	var hCommit bn254.G1Affine
-	hCommit.MultiExp(srs.G1[:len(p)], h, config)
-
-	// Aggregate the hCommit
-	if mpi.SelfRank == 0 {
-		// Root node
-		allfY[0] = fY
-		subCom := make([]bn254.G1Affine, mpi.WorldSize)
-		subCom[0] = hCommit
-		for i := 1; i < int(mpi.WorldSize); i++ {
-			subComBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, uint64(i))
-			if err != nil {
-				return PartialOpenedProof{}, err
-			}
-			subCom[i] = BytesToG1Affine(subComBytes)
-
-			slavefYBytes, err := mpi.ReceiveBytes(32, uint64(i))
-			if err != nil {
-				return PartialOpenedProof{}, err
-			}
-			allfY[i].SetBytes(slavefYBytes)
-		}
-		hCommit = subCom[0]
-		for i := 1; i < int(mpi.WorldSize); i++ {
-			hCommit.Add(&hCommit, &subCom[i])
-		}
-		// Send the final commitment to all compute nodes
-		for i := 1; i < int(mpi.WorldSize); i++ {
-			if err := mpi.SendBytes(G1AffineToBytes(hCommit), uint64(i)); err != nil {
-				return PartialOpenedProof{}, err
-			}
-		}
-		// Send the allfY to all compute nodes
-		buf := make([]byte, 32*mpi.WorldSize)
-		for i := 0; i < int(mpi.WorldSize); i++ {
-			ibuf := allfY[i].Bytes()
-			copy(buf[i*32:], ibuf[:])
-		}
-		for i := 1; i < int(mpi.WorldSize); i++ {
-			if err := mpi.SendBytes(buf, uint64(i)); err != nil {
-				return PartialOpenedProof{}, err
-			}
-		}
-	} else {
-		// Other nodes
-		if err := mpi.SendBytes(G1AffineToBytes(hCommit), 0); err != nil {
-			return PartialOpenedProof{}, err
-		}
-		fyBytes := fY.Bytes()
-
-		if err := mpi.SendBytes(fyBytes[:], 0); err != nil {
-			return PartialOpenedProof{}, err
-		}
-		// Receive the final commitment from the root node
-		finalResBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, 0)
-		if err != nil {
-			return PartialOpenedProof{}, err
-		}
-		hCommit = BytesToG1Affine(finalResBytes)
-
-		//Receive the final fY from the root node
-		finalfyBytes, err := mpi.ReceiveBytes(32*mpi.WorldSize, 0)
-		if err != nil {
-			return PartialOpenedProof{}, err
-		}
-		for i := 0; i < int(mpi.WorldSize); i++ {
-			allfY[i].SetBytes(finalfyBytes[i*32 : (i+1)*32])
-		}
+	// Other nodes
+	fYBytes := fY.Bytes()
+	if err := mpi.SendBytes(fYBytes[:], 0); err != nil {
+		return OpeningProof{}, nil, err
 	}
-
-	partialProof := PartialOpenedProof{
-		Com:   newCom,
-		Proof: hCommit,
-		Evals: allfY,
+	if err := mpi.SendBytes(G1AffineToBytes(comFY), 0); err != nil {
+		return OpeningProof{}, nil, err
 	}
-	return partialProof, nil
+	if err := mpi.SendBytes(G1AffineToBytes(comH), 0); err != nil {
+		return OpeningProof{}, nil, err
+	}
+	return OpeningProof{}, nil, nil
 }
 
+// BatchOpeningProof opening proof for many polynomials at the same point
+//
 // implements io.ReaderFrom and io.WriterTo
-type Proof struct {
-	// Proof
-	// Evaluation
-	Result fr.Element
-	Proof  bn254.G1Affine
+type BatchOpeningProof struct {
+	// H quotient polynomial Sum_i gamma**i*(f - f(z))/(x-z)
+	H bn254.G1Affine
+
+	// ClaimedValues purported values
+	ClaimedDigests []bn254.G1Affine
 }
 
-// OpeningProof KZG proof for opening at a single 2-D point.
-func Open(p []fr.Element, x fr.Element, y fr.Element, srs *SRS) (Proof, error) {
-	PartialProof, err := partialOpen(p, y, srs)
+// Verify verifies a KZG opening proof at a single point
+func Verify(commitment *Digest, proof *OpeningProof, point fr.Element, srs *SRS) error {
+	// [f(a)]G₁
+	var claimedValueG1Aff bn254.G1Jac
+	claimedValueG1Aff.FromAffine(&proof.ClaimedDigest)
+
+	// [f(α) - f(a)]G₁
+	var fminusfaG1Jac bn254.G1Jac
+	fminusfaG1Jac.FromAffine(commitment)
+	fminusfaG1Jac.SubAssign(&claimedValueG1Aff)
+
+	// [-H(α)]G₁
+	var negH bn254.G1Affine
+	negH.Neg(&proof.H)
+
+	// [α-a]G₂
+	var alphaMinusaG2Jac, genG2Jac, alphaG2Jac bn254.G2Jac
+	var pointBigInt big.Int
+	point.ToBigIntRegular(&pointBigInt)
+	genG2Jac.FromAffine(&srs.G2[0])
+	alphaG2Jac.FromAffine(&srs.G2[1])
+	alphaMinusaG2Jac.ScalarMultiplication(&genG2Jac, &pointBigInt).
+		Neg(&alphaMinusaG2Jac).
+		AddAssign(&alphaG2Jac)
+
+	// [α-a]G₂
+	var xminusaG2Aff bn254.G2Affine
+	xminusaG2Aff.FromJacobian(&alphaMinusaG2Jac)
+
+	// [f(α) - f(a)]G₁
+	var fminusfaG1Aff bn254.G1Affine
+	fminusfaG1Aff.FromJacobian(&fminusfaG1Jac)
+
+	// e([f(α) - f(a)]G₁, G₂).e([-H(α)]G₁, [α-a]G₂) ==? 1
+	check, err := bn254.PairingCheck(
+		[]bn254.G1Affine{fminusfaG1Aff, negH},
+		[]bn254.G2Affine{srs.G2[0], xminusaG2Aff},
+	)
 	if err != nil {
-		return Proof{}, err
+		return err
+	}
+	if !check {
+		return ErrVerifyOpeningProof
+	}
+	return nil
+}
+
+// BatchOpenSinglePoint creates a batch opening proof at point of a list of polynomials.
+// It's an interactive protocol, made non interactive using Fiat Shamir.
+//
+// * point is the point at which the polynomials are opened.
+// * digests is the list of committed polynomials to open, need to derive the challenge using Fiat Shamir.
+// * polynomials is the list of polynomials to open, they are supposed to be of the same size.
+func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr.Element, hf hash.Hash, srs *SRS) (BatchOpeningProof, [][]fr.Element, error) {
+	// check for invalid sizes
+	nbDigests := len(digests)
+	if nbDigests != len(polynomials) {
+		return BatchOpeningProof{}, nil, ErrInvalidNbDigests
 	}
 
-	lagrange := lagrangeCalc(int(mpi.SelfRank), x)
-
-	fieldSize := fr.Modulus()
-	multiplicativeGroupSize := new(big.Int).Sub(fieldSize, big.NewInt(1))
-	omegaPow := new(big.Int).Div(multiplicativeGroupSize, big.NewInt(int64(mpi.WorldSize)))
-	omegaBigInt, _ := new(big.Int).SetString("19103219067921713944291392827692070036145651957329286315305642004821462161904", 10)
-	omega := *new(fr.Element).SetBigInt(omegaBigInt)
-	// BUG: side channel attack
-	omega.Exp(omega, omegaPow)
-	_x := fr.One()
-
-	// Compute all kinds of lagrange polynomial
-	lags := make([]fr.Element, mpi.WorldSize)
-	for i := 0; i < int(mpi.WorldSize); i++ {
-		lags[i] = lagrangeCalc(i, _x)
-		_x.Mul(&_x, &omega)
+	// TODO ensure the polynomials are of the same size
+	largestPoly := -1
+	for _, p := range polynomials {
+		if len(p) == 0 || len(p) > len(srs.G1) {
+			return BatchOpeningProof{}, nil, ErrInvalidPolynomialSize
+		}
+		if len(p) > largestPoly {
+			largestPoly = len(p)
+		}
 	}
 
-	// Compute the proof
-	// f(X) = \sum_{i=0}^{M-1} fY[i] * L_i(X)
+	// compute the purported values
+	claimedValues := make([]fr.Element, len(polynomials))
+	claimedDigests := make([]bn254.G1Affine, len(polynomials))
+	var wg sync.WaitGroup
+	wg.Add(len(polynomials))
+	for i := 0; i < len(polynomials); i++ {
+		go func(_i int) {
+			claimedValues[_i] = eval(polynomials[_i], point)
+			var claimedValueBigInt big.Int
+			claimedValues[_i].ToBigIntRegular(&claimedValueBigInt)
+			claimedDigests[_i].ScalarMultiplication(&srs.G1[0], &claimedValueBigInt)
+			wg.Done()
+		}(i)
+	}
+
+	// derive the challenge γ, binded to the point and the commitments
+	gamma, err := deriveGamma(point, digests, hf)
+	if err != nil {
+		return BatchOpeningProof{}, nil, err
+	}
+
+	// ∑ᵢγⁱf(a)
+	var fY fr.Element
+	chSumGammai := make(chan struct{}, 1)
+	go func() {
+		// wait for polynomial evaluations to be completed (res.ClaimedValues)
+		wg.Wait()
+		fY = claimedValues[nbDigests-1]
+		for i := nbDigests - 2; i >= 0; i-- {
+			fY.Mul(&fY, &gamma).
+				Add(&fY, &claimedValues[i])
+		}
+		close(chSumGammai)
+	}()
+
+	// compute ∑ᵢγⁱfᵢ
+	// note: if we are willing to paralellize that, we could clone the poly and scale them by
+	// gamma n in parallel, before reducing into foldedPolynomials
+	foldedPolynomials := make([]fr.Element, largestPoly)
+	copy(foldedPolynomials, polynomials[0])
+	acc := gamma
+	var pj fr.Element
+	for i := 1; i < len(polynomials); i++ {
+		for j := 0; j < len(polynomials[i]); j++ {
+			pj.Mul(&polynomials[i][j], &acc)
+			foldedPolynomials[j].Add(&foldedPolynomials[j], &pj)
+		}
+		acc.Mul(&acc, &gamma)
+	}
+
+	<-chSumGammai
+
+	// compute H
+	h := dividePolyByXminusA(foldedPolynomials, fY, point)
+	foldedPolynomials = nil // same memory as h
+
+	comH, err := Commit(h, srs)
+	if err != nil {
+		return BatchOpeningProof{}, nil, err
+	}
+
+	// Send the new commitment to the root node
 	if mpi.SelfRank == 0 {
 		// Root node
-		// f(x) = \sum_{i=0}^{M-1} fY[i] * L_i(x)
-		// Get L_i(x) from all compute nodes
-		subLagrange := make([]fr.Element, mpi.WorldSize)
-		subLagrange[0] = lagrange
-		for i := 1; i < int(mpi.WorldSize); i++ {
-			subLagrangeBytes, err := mpi.ReceiveBytes(32, uint64(i))
-			if err != nil {
-				return Proof{}, err
-			}
-			subLagrange[i].SetBytes(subLagrangeBytes)
-		}
-
-		// Compute f(x)
-		var res fr.Element
-		res.SetZero()
-		for i := 0; i < int(mpi.WorldSize); i++ {
-			var tmp fr.Element
-			tmp.Mul(&subLagrange[i], &PartialProof.Evals[i])
-			res.Add(&res, &tmp)
-		}
-
-		// compute h(X) = (f(X) - res) / (X - x)
-		// compute h(omega^i) for all i
-		var hX []fr.Element
-		omegaI := fr.One()
-		for i := 0; i < int(mpi.WorldSize); i++ {
-			var fX fr.Element
-			fX.SetZero()
-			var LX []fr.Element
-			LX[0] = lags[i]
-			for j := 1; j < int(mpi.WorldSize); j++ {
-				//receive lag from client j
-				subLagrangeBytes, err := mpi.ReceiveBytes(32, uint64(j))
+		allClaimedValues := make([][]fr.Element, nbDigests)
+		allClaimedDigests := make([][]bn254.G1Affine, nbDigests)
+		allComH := make([]bn254.G1Affine, mpi.WorldSize)
+		allClaimedValues[0] = claimedValues
+		allClaimedDigests[0] = claimedDigests
+		allComH[0] = comH
+		for k := 0; k < nbDigests; k++ {
+			allClaimedValues[k] = make([]fr.Element, mpi.WorldSize)
+			for i := 1; i < int(mpi.WorldSize); i++ {
+				claimedValueBytes, err := mpi.ReceiveBytes(fr.Bytes, uint64(i))
 				if err != nil {
-					return Proof{}, err
+					return BatchOpeningProof{}, nil, err
 				}
-				LX[j].SetBytes(subLagrangeBytes)
+				allClaimedValues[k][i].SetBytes(claimedValueBytes)
+				claimedDigestBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, uint64(i))
+				if err != nil {
+					return BatchOpeningProof{}, nil, err
+				}
+				allClaimedDigests[k][i] = BytesToG1Affine(claimedDigestBytes)
 			}
-			for j := 0; j < int(mpi.WorldSize); j++ {
-				var tmp fr.Element
-				tmp.Mul(&LX[j], &PartialProof.Evals[j])
-				fX.Add(&fX, &tmp)
-			}
-			//hX[i] = (fX - res) / (omega^i - x)
-			up := new(fr.Element).Sub(&fX, &res)
-			down := new(fr.Element).Sub(&omegaI, &x)
-			down.Inverse(down)
-			hX[i].Mul(up, down)
-			omegaI.Mul(&omegaI, &omega)
 		}
-		// Align the order of hX
-		omegaI = fr.One()
-		for i := 0; i < int(mpi.WorldSize); i++ {
-			hX[i].Mul(&hX[i], &omegaI)
-			omegaI.Mul(&omegaI, &omega)
-		}
-		// Now hX is evaluation of h(x) * x, degree is M - 1
-		// Inverse fft to get coefficient of h(x) * x
-		domain := fft.NewDomain(mpi.WorldSize)
-		_hX := make([]fr.Element, mpi.WorldSize)
-		copy(_hX, hX)
-		domain.FFTInverse(_hX, fft.DIF)
-		fft.BitReverse(_hX)
-		// Now _hX is coefficient of h(x) * x, degree is M - 1
 
-		// Commit to _hx
-		commit, err := kzg.Commit(_hX, srs.kzgSRS)
-		if err != nil {
-			return Proof{}, err
-		}
-		finalProof := Proof{
-			Result: res,
-			Proof:  commit,
-		}
-		//Send final proof to all compute nodes
 		for i := 1; i < int(mpi.WorldSize); i++ {
-			ProofBytes := G1AffineToBytes(finalProof.Proof)
-			ResultBytes := finalProof.Result.Bytes()
-			err = mpi.SendBytes(ProofBytes, uint64(i))
+			comHBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, uint64(i))
 			if err != nil {
-				return Proof{}, err
+				return BatchOpeningProof{}, nil, err
 			}
-			err = mpi.SendBytes(ResultBytes[:], uint64(i))
-			if err != nil {
-				return Proof{}, err
-			}
-		}
-		return finalProof, nil
-	} else {
-		// Send L_i(x) to the root node
-		lagBytes := lagrange.Bytes()
-		if err := mpi.SendBytes(lagBytes[:], 0); err != nil {
-			return Proof{}, err
+			allComH[i] = BytesToG1Affine(comHBytes)
 		}
 
-		for i := 0; i < int(mpi.WorldSize); i++ {
-			// Send L_rank(omega^i) to the root node
-			lagBytes := lags[i].Bytes()
-			if err := mpi.SendBytes(lagBytes[:], 0); err != nil {
-				return Proof{}, err
+		for k := range allClaimedValues {
+			claimedDigests[k] = allClaimedDigests[k][0]
+			for i := 1; i < int(mpi.WorldSize); i++ {
+				claimedDigests[k].Add(&claimedDigests[k], &allClaimedDigests[k][i])
 			}
 		}
+		comH = allComH[0]
+		for i := 1; i < int(mpi.WorldSize); i++ {
+			comH.Add(&comH, &allComH[i])
+		}
 
-		// Get the final result from the root node
-		ProofBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, 0)
-		if err != nil {
-			return Proof{}, err
-		}
-		ResultBytes, err := mpi.ReceiveBytes(32, 0)
-		if err != nil {
-			return Proof{}, err
-		}
-		proof := BytesToG1Affine(ProofBytes)
-		var Result fr.Element
-		Result.SetBytes(ResultBytes)
-		finalProof := Proof{
-			Result: Result,
-			Proof:  proof,
-		}
-		return finalProof, nil
+		return BatchOpeningProof{
+			H:              comH,
+			ClaimedDigests: claimedDigests,
+		}, allClaimedValues, nil
 	}
+
+	// Other nodes
+	for k := 0; k < nbDigests; k++ {
+		claimedValueBytes := claimedValues[k].Bytes()
+		if err := mpi.SendBytes(claimedValueBytes[:], 0); err != nil {
+			return BatchOpeningProof{}, nil, err
+		}
+		if err := mpi.SendBytes(G1AffineToBytes(claimedDigests[k]), 0); err != nil {
+			return BatchOpeningProof{}, nil, err
+		}
+
+	}
+	if err := mpi.SendBytes(G1AffineToBytes(comH), 0); err != nil {
+		return BatchOpeningProof{}, nil, err
+	}
+	return BatchOpeningProof{}, nil, nil
+}
+
+// FoldProof fold the digests and the proofs in batchOpeningProof using Fiat Shamir
+// to obtain an opening proof at a single point.
+//
+// * digests list of digests on which batchOpeningProof is based
+// * batchOpeningProof opening proof of digests
+// * returns the folded version of batchOpeningProof, Digest, the folded version of digests
+func FoldProof(digests []Digest, batchOpeningProof *BatchOpeningProof, point fr.Element, hf hash.Hash) (OpeningProof, Digest, error) {
+	nbDigests := len(digests)
+
+	// check consistancy between numbers of claims vs number of digests
+	if nbDigests != len(batchOpeningProof.ClaimedDigests) {
+		return OpeningProof{}, Digest{}, ErrInvalidNbDigests
+	}
+
+	// derive the challenge γ, binded to the point and the commitments
+	gamma, err := deriveGamma(point, digests, hf)
+	if err != nil {
+		return OpeningProof{}, Digest{}, ErrInvalidNbDigests
+	}
+
+	// fold the claimed values and digests
+	// gammai = [1,γ,γ²,..,γⁿ⁻¹]
+	gammai := make([]fr.Element, nbDigests)
+	gammai[0].SetOne()
+	for i := 1; i < nbDigests; i++ {
+		gammai[i].Mul(&gammai[i-1], &gamma)
+	}
+
+	foldedDigests, foldedEvaluations, err := fold(digests, batchOpeningProof.ClaimedDigests, gammai)
+	if err != nil {
+		return OpeningProof{}, Digest{}, err
+	}
+
+	// create the folded opening proof
+	var res OpeningProof
+	res.ClaimedDigest.Set(&foldedEvaluations)
+	res.H.Set(&batchOpeningProof.H)
+
+	return res, foldedDigests, nil
+}
+
+// BatchVerifySinglePoint verifies a batched opening proof at a single point of a list of polynomials.
+//
+// * digests list of digests on which opening proof is done
+// * batchOpeningProof proof of correct opening on the digests
+func BatchVerifySinglePoint(digests []Digest, batchOpeningProof *BatchOpeningProof, point fr.Element, hf hash.Hash, srs *SRS) error {
+	return fmt.Errorf("not implemented")
+}
+
+// BatchVerifyMultiPoints batch verifies a list of opening proofs at different points.
+// The purpose of the batching is to have only one pairing for verifying several proofs.
+//
+// * digests list of committed polynomials
+// * proofs list of opening proofs, one for each digest
+// * points the list of points at which the opening are done
+func BatchVerifyMultiPoints(digests []Digest, proofs []OpeningProof, points []fr.Element, srs *SRS) error {
+	// check consistancy nb proogs vs nb digests
+	if len(digests) != len(proofs) || len(digests) != len(points) {
+		return ErrInvalidNbDigests
+	}
+
+	// if only one digest, call Verify
+	if len(digests) == 1 {
+		return Verify(&digests[0], &proofs[0], points[0], srs)
+	}
+
+	// sample random numbers λᵢ for sampling
+	randomNumbers := make([]fr.Element, len(digests))
+	randomNumbers[0].SetOne()
+	for i := 1; i < len(randomNumbers); i++ {
+		_, err := randomNumbers[i].SetRandom()
+		if err != nil {
+			return err
+		}
+	}
+
+	// fold the committed quotients compute ∑ᵢλᵢ[Hᵢ(α)]G₁
+	var foldedQuotients bn254.G1Affine
+	quotients := make([]bn254.G1Affine, len(proofs))
+	for i := 0; i < len(randomNumbers); i++ {
+		quotients[i].Set(&proofs[i].H)
+	}
+	config := ecc.MultiExpConfig{ScalarsMont: true}
+	_, err := foldedQuotients.MultiExp(quotients, randomNumbers, config)
+	if err != nil {
+		return nil
+	}
+
+	// fold digests and evalCommits
+	evalCommits := make([]bn254.G1Affine, len(digests))
+	for i := 0; i < len(randomNumbers); i++ {
+		evalCommits[i].Set(&proofs[i].ClaimedDigest)
+	}
+
+	// fold the digests: ∑ᵢλᵢ[f_i(α)]G₁
+	// fold the evals  : ∑ᵢλᵢfᵢ(aᵢ)
+	foldedDigests, foldedEvalsCommit, err := fold(digests, evalCommits, randomNumbers)
+	if err != nil {
+		return err
+	}
+
+	// compute foldedDigests = ∑ᵢλᵢ[fᵢ(α)]G₁ - [∑ᵢλᵢfᵢ(aᵢ)]G₁
+	foldedDigests.Sub(&foldedDigests, &foldedEvalsCommit)
+
+	// combien the points and the quotients using γᵢ
+	// ∑ᵢλᵢ[p_i]([Hᵢ(α)]G₁)
+	var foldedPointsQuotients bn254.G1Affine
+	for i := 0; i < len(randomNumbers); i++ {
+		randomNumbers[i].Mul(&randomNumbers[i], &points[i])
+	}
+	_, err = foldedPointsQuotients.MultiExp(quotients, randomNumbers, config)
+	if err != nil {
+		return err
+	}
+
+	// ∑ᵢλᵢ[f_i(α)]G₁ - [∑ᵢλᵢfᵢ(aᵢ)]G₁ + ∑ᵢλᵢ[p_i]([Hᵢ(α)]G₁)
+	// = [∑ᵢλᵢf_i(α) - ∑ᵢλᵢfᵢ(aᵢ) + ∑ᵢλᵢpᵢHᵢ(α)]G₁
+	foldedDigests.Add(&foldedDigests, &foldedPointsQuotients)
+
+	// -∑ᵢλᵢ[Qᵢ(α)]G₁
+	foldedQuotients.Neg(&foldedQuotients)
+
+	// pairing check
+	// e([∑ᵢλᵢ(fᵢ(α) - fᵢ(pᵢ) + pᵢHᵢ(α))]G₁, G₂).e([-∑ᵢλᵢ[Hᵢ(α)]G₁), [α]G₂)
+	check, err := bn254.PairingCheck(
+		[]bn254.G1Affine{foldedDigests, foldedQuotients},
+		[]bn254.G2Affine{srs.G2[0], srs.G2[1]},
+	)
+	if err != nil {
+		return err
+	}
+	if !check {
+		return ErrVerifyOpeningProof
+	}
+	return nil
+
+}
+
+// fold folds digests and evaluations using the list of factors as random numbers.
+//
+// * digests list of digests to fold
+// * evaluations list of evaluations to fold
+// * factors list of multiplicative factors used for the folding (in Montgomery form)
+//
+// * Returns ∑ᵢcᵢdᵢ, ∑ᵢcᵢf(aᵢ)
+func fold(di []Digest, fai []bn254.G1Affine, ci []fr.Element) (Digest, Digest, error) {
+	// length inconsistancy between digests and evaluations should have been done before calling this function
+	nbDigests := len(di)
+
+	// fold the claimed values ∑ᵢcᵢf(aᵢ)
+	var foldedEvaluations, tmp bn254.G1Affine
+	for i := 0; i < nbDigests; i++ {
+		var ciBigInt big.Int
+		ci[i].ToBigIntRegular(&ciBigInt)
+		tmp.ScalarMultiplication(&fai[i], &ciBigInt)
+		foldedEvaluations.Add(&foldedEvaluations, &tmp)
+	}
+
+	// fold the digests ∑ᵢ[cᵢ]([fᵢ(α)]G₁)
+	var foldedDigests Digest
+	_, err := foldedDigests.MultiExp(di, ci, ecc.MultiExpConfig{ScalarsMont: true})
+	if err != nil {
+		return foldedDigests, foldedEvaluations, err
+	}
+
+	// folding done
+	return foldedDigests, foldedEvaluations, nil
+
+}
+
+// deriveGamma derives a challenge using Fiat Shamir to fold proofs.
+func deriveGamma(point fr.Element, digests []Digest, hf hash.Hash) (fr.Element, error) {
+
+	// derive the challenge gamma, binded to the point and the commitments
+	fs := fiatshamir.NewTranscript(hf, "gamma")
+	if err := fs.Bind("gamma", point.Marshal()); err != nil {
+		return fr.Element{}, err
+	}
+	for i := 0; i < len(digests); i++ {
+		if err := fs.Bind("gamma", digests[i].Marshal()); err != nil {
+			return fr.Element{}, err
+		}
+	}
+	gammaByte, err := fs.ComputeChallenge("gamma")
+	if err != nil {
+		return fr.Element{}, err
+	}
+	var gamma fr.Element
+	gamma.SetBytes(gammaByte)
+
+	return gamma, nil
 }

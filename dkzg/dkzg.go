@@ -8,7 +8,7 @@ import (
 
 	"github.com/consensys/gnark-crypto/ecc"
 
-	kzg_bn254 "github.com/consensys/gnark-crypto/ecc/bn254/fr/dkzg"
+	dkzg_bn254 "github.com/consensys/gnark-crypto/ecc/bn254/fr/dkzg"
 )
 
 // SRS ...
@@ -22,7 +22,7 @@ type SRS interface {
 func NewSRS(curveID ecc.ID) SRS {
 	switch curveID {
 	case ecc.BN254:
-		return &kzg_bn254.SRS{}
+		return &dkzg_bn254.SRS{}
 	default:
 		panic("not implemented")
 	}
