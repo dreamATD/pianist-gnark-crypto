@@ -11,6 +11,7 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bn254"
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 	fiatshamir "github.com/consensys/gnark-crypto/fiat-shamir"
+	"github.com/consensys/gnark-crypto/internal/parallel"
 	"github.com/sunblaze-ucb/simpleMPI/mpi"
 )
 
@@ -43,9 +44,9 @@ func eval(p []fr.Element, point fr.Element) fr.Element {
 }
 
 func lagrangeCalc(t int, tau0 fr.Element) fr.Element {
-	fieldSize := fr.Modulus()
 	m := big.NewInt(int64(mpi.WorldSize))
 	mField := new(fr.Element).SetBigInt(m)
+	fieldSize := fr.Modulus()
 	multiplicativeGroupSize := new(big.Int).Sub(fieldSize, big.NewInt(1))
 	omegaPow := new(big.Int).Div(multiplicativeGroupSize, m)
 	omegaBigInt, _ := new(big.Int).SetString("19103219067921713944291392827692070036145651957329286315305642004821462161904", 10)
@@ -407,10 +408,12 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 	acc := gamma
 	var pj fr.Element
 	for i := 1; i < len(polynomials); i++ {
-		for j := 0; j < len(polynomials[i]); j++ {
-			pj.Mul(&polynomials[i][j], &acc)
-			foldedPolynomials[j].Add(&foldedPolynomials[j], &pj)
-		}
+		parallel.Execute(len(polynomials[i]), func(start, end int) {
+			for j := start; j < end; j++ {
+				pj.Mul(&polynomials[i][j], &acc)
+				foldedPolynomials[j].Add(&foldedPolynomials[j], &pj)
+			}
+		})
 		acc.Mul(&acc, &gamma)
 	}
 
