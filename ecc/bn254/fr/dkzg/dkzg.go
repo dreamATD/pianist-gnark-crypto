@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash"
 	"math/big"
+	"runtime/debug"
 	"sync"
 
 	"github.com/consensys/gnark-crypto/ecc"
@@ -41,6 +42,10 @@ func eval(p []fr.Element, point fr.Element) fr.Element {
 		res.Mul(&res, &point).Add(&res, &p[i])
 	}
 	return res
+}
+
+func init() {
+	mpi.WorldInit("ip.txt", "/home/farmer/.ssh/id_rsa", "farmer")
 }
 
 func lagrangeCalc(t int, tau0 fr.Element) fr.Element {
@@ -87,6 +92,7 @@ func NewSRS(size uint64, tau []*big.Int) (*SRS, error) {
 
 	lagBigInt := new(big.Int)
 	lagTau0.ToBigIntRegular(lagBigInt)
+	srs.G1 = make([]bn254.G1Affine, size)
 	srs.G1[0].ScalarMultiplication(&gen1Aff, lagBigInt)
 
 	alphas := make([]fr.Element, size-1)
@@ -116,6 +122,7 @@ func Commit(p []fr.Element, srs *SRS, nbTasks ...int) (Digest, error) {
 	// and sends the final commitment to all compute nodes
 
 	if len(p) == 0 || len(p) > len(srs.G1) {
+		fmt.Println(string(debug.Stack()))
 		return Digest{}, ErrInvalidPolynomialSize
 	}
 
@@ -138,6 +145,7 @@ func Commit(p []fr.Element, srs *SRS, nbTasks ...int) (Digest, error) {
 		for i := 1; i < int(mpi.WorldSize); i++ {
 			subComBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, uint64(i))
 			if err != nil {
+				panic(err)
 				return Digest{}, err
 			}
 			subCom[i] = BytesToG1Affine(subComBytes)
@@ -195,6 +203,7 @@ F(\tau[0], \tau[1]) - F(x, \tau[1]) / (\tau[0] - x) = h(x)
 */
 func Open(p []fr.Element, y fr.Element, srs *SRS, nbTasks ...int) (OpeningProof, []fr.Element, error) {
 	if len(p) == 0 || len(p) > len(srs.G1) {
+		fmt.Println(string(debug.Stack()))
 		return OpeningProof{}, nil, ErrInvalidPolynomialSize
 	}
 
@@ -358,6 +367,7 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 	largestPoly := -1
 	for _, p := range polynomials {
 		if len(p) == 0 || len(p) > len(srs.G1) {
+			fmt.Println(string(debug.Stack()))
 			return BatchOpeningProof{}, nil, ErrInvalidPolynomialSize
 		}
 		if len(p) > largestPoly {
@@ -434,11 +444,12 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 		allClaimedValues := make([][]fr.Element, nbDigests)
 		allClaimedDigests := make([][]bn254.G1Affine, nbDigests)
 		allComH := make([]bn254.G1Affine, mpi.WorldSize)
-		allClaimedValues[0] = claimedValues
-		allClaimedDigests[0] = claimedDigests
 		allComH[0] = comH
 		for k := 0; k < nbDigests; k++ {
 			allClaimedValues[k] = make([]fr.Element, mpi.WorldSize)
+			allClaimedDigests[k] = make([]bn254.G1Affine, mpi.WorldSize)
+			allClaimedValues[k][0] = claimedValues[k]
+			allClaimedDigests[k][0] = claimedDigests[k]
 			for i := 1; i < int(mpi.WorldSize); i++ {
 				claimedValueBytes, err := mpi.ReceiveBytes(fr.Bytes, uint64(i))
 				if err != nil {
@@ -506,12 +517,14 @@ func FoldProof(digests []Digest, batchOpeningProof *BatchOpeningProof, point fr.
 
 	// check consistancy between numbers of claims vs number of digests
 	if nbDigests != len(batchOpeningProof.ClaimedDigests) {
+		fmt.Println("Catch")
 		return OpeningProof{}, Digest{}, ErrInvalidNbDigests
 	}
 
 	// derive the challenge γ, binded to the point and the commitments
 	gamma, err := deriveGamma(point, digests, hf)
 	if err != nil {
+		fmt.Println("Catch2")
 		return OpeningProof{}, Digest{}, ErrInvalidNbDigests
 	}
 
@@ -667,23 +680,35 @@ func fold(di []Digest, fai []bn254.G1Affine, ci []fr.Element) (Digest, Digest, e
 
 // deriveGamma derives a challenge using Fiat Shamir to fold proofs.
 func deriveGamma(point fr.Element, digests []Digest, hf hash.Hash) (fr.Element, error) {
-
-	// derive the challenge gamma, binded to the point and the commitments
-	fs := fiatshamir.NewTranscript(hf, "gamma")
-	if err := fs.Bind("gamma", point.Marshal()); err != nil {
-		return fr.Element{}, err
-	}
-	for i := 0; i < len(digests); i++ {
-		if err := fs.Bind("gamma", digests[i].Marshal()); err != nil {
+	if mpi.SelfRank == 0 {
+		// derive the challenge gamma, binded to the point and the commitments
+		fs := fiatshamir.NewTranscript(hf, "gamma")
+		if err := fs.Bind("gamma", point.Marshal()); err != nil {
 			return fr.Element{}, err
 		}
+		for i := 0; i < len(digests); i++ {
+			if err := fs.Bind("gamma", digests[i].Marshal()); err != nil {
+				return fr.Element{}, err
+			}
+		}
+		gammaByte, err := fs.ComputeChallenge("gamma")
+		if err != nil {
+			return fr.Element{}, err
+		}
+		var gamma fr.Element
+		gamma.SetBytes(gammaByte)
+		buf := gamma.Bytes()
+		for i := 1; i < int(mpi.WorldSize); i++ {
+			mpi.SendBytes(buf[:], uint64(i))
+		}
+		return gamma, nil
+	} else {
+		buf, err := mpi.ReceiveBytes(32, 0)
+		if err != nil {
+			return fr.Element{}, err
+		}
+		var gamma fr.Element
+		gamma.SetBytes(buf)
+		return gamma, nil
 	}
-	gammaByte, err := fs.ComputeChallenge("gamma")
-	if err != nil {
-		return fr.Element{}, err
-	}
-	var gamma fr.Element
-	gamma.SetBytes(gammaByte)
-
-	return gamma, nil
 }

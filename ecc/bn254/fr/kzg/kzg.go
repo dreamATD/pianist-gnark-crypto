@@ -18,8 +18,10 @@ package kzg
 
 import (
 	"errors"
+	"fmt"
 	"hash"
 	"math/big"
+	"runtime/debug"
 	"sync"
 
 	"github.com/consensys/gnark-crypto/ecc"
@@ -120,6 +122,8 @@ type BatchOpeningProof struct {
 func Commit(p []fr.Element, srs *SRS, nbTasks ...int) (Digest, error) {
 
 	if len(p) == 0 || len(p) > len(srs.G1) {
+		fmt.Println(string(debug.Stack()))
+		fmt.Println(len(p), len(srs.G1))
 		return Digest{}, ErrInvalidPolynomialSize
 	}
 
@@ -140,6 +144,7 @@ func Commit(p []fr.Element, srs *SRS, nbTasks ...int) (Digest, error) {
 // fft.Domain Cardinality must be larger than p.Degree()
 func Open(p []fr.Element, point fr.Element, srs *SRS) (OpeningProof, error) {
 	if len(p) == 0 || len(p) > len(srs.G1) {
+		fmt.Println(string(debug.Stack()))
 		return OpeningProof{}, ErrInvalidPolynomialSize
 	}
 
@@ -226,6 +231,8 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 	// check for invalid sizes
 	nbDigests := len(digests)
 	if nbDigests != len(polynomials) {
+
+		fmt.Println("Catch3")
 		return BatchOpeningProof{}, ErrInvalidNbDigests
 	}
 
@@ -233,6 +240,7 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 	largestPoly := -1
 	for _, p := range polynomials {
 		if len(p) == 0 || len(p) > len(srs.G1) {
+			fmt.Println(string(debug.Stack()))
 			return BatchOpeningProof{}, ErrInvalidPolynomialSize
 		}
 		if len(p) > largestPoly {
@@ -313,6 +321,9 @@ func FoldProof(digests []Digest, batchOpeningProof *BatchOpeningProof, point fr.
 
 	// check consistancy between numbers of claims vs number of digests
 	if nbDigests != len(batchOpeningProof.ClaimedValues) {
+		fmt.Println(string(debug.Stack()))
+		fmt.Println(nbDigests)
+		fmt.Println(len(batchOpeningProof.ClaimedValues))
 		return OpeningProof{}, Digest{}, ErrInvalidNbDigests
 	}
 
@@ -492,6 +503,7 @@ func fold(di []Digest, fai []fr.Element, ci []fr.Element) (Digest, fr.Element, e
 func deriveGamma(point fr.Element, digests []Digest, hf hash.Hash) (fr.Element, error) {
 
 	// derive the challenge gamma, binded to the point and the commitments
+	
 	fs := fiatshamir.NewTranscript(hf, "gamma")
 	if err := fs.Bind("gamma", point.Marshal()); err != nil {
 		return fr.Element{}, err
@@ -515,6 +527,10 @@ func deriveGamma(point fr.Element, digests []Digest, hf hash.Hash) (fr.Element, 
 // f memory is re-used for the result
 func dividePolyByXminusA(f []fr.Element, fa, a fr.Element) []fr.Element {
 
+	if len(f) == 1 {
+		return f
+	}
+
 	// first we compute f-f(a)
 	f[0].Sub(&f[0], &fa)
 
@@ -525,7 +541,6 @@ func dividePolyByXminusA(f []fr.Element, fa, a fr.Element) []fr.Element {
 
 		f[i].Add(&f[i], &t)
 	}
-
 	// the result is of degree deg(f)-1
 	return f[1:]
 }

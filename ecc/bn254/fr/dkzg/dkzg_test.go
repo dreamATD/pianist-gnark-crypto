@@ -99,8 +99,12 @@ func TestSerializationSRS(t *testing.T) {
 	}
 
 	// compare
-	if !reflect.DeepEqual(srs, &_srs) {
-		t.Fatal("scheme serialization failed")
+
+	if !reflect.DeepEqual(srs.G2, _srs.G2) {
+		t.Fatal("scheme serialization failed G2")
+	}
+	if !reflect.DeepEqual(srs.G1, _srs.G1) {
+		t.Fatal("scheme serialization failed G1")
 	}
 
 }
@@ -200,7 +204,10 @@ func BenchmarkKZGVerify(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Verify(&comm, &openingProof, r, benchSRS)
+		err := Verify(&comm, &openingProof, r, benchSRS)
+		if err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -230,7 +237,10 @@ func BenchmarkKZGBatchOpen10(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		BatchOpenSinglePoint(ps[:], commitments[:], r, hf, benchSRS)
+		_, _, err := BatchOpenSinglePoint(ps[:], commitments[:], r, hf, benchSRS)
+		if err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -265,7 +275,10 @@ func BenchmarkKZGBatchVerify10(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		BatchVerifySinglePoint(commitments[:], &proof, r, hf, benchSRS)
+		err := BatchVerifySinglePoint(commitments[:], &proof, r, hf, benchSRS)
+		if err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

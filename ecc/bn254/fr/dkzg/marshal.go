@@ -103,10 +103,22 @@ func (srs *SRS) ReadFrom(r io.Reader) (int64, error) {
 	// decode the SRS
 	buf := make([]byte, 0)
 	buf = append(buf, make([]byte, 128*2)...) // G2
-	buf = append(buf, make([]byte, 64*len(srs.G1))...)
 	n, err := r.Read(buf)
 	if err != nil {
 		return int64(n), err
+	}
+	// G1
+	for {
+		subBuf := make([]byte, 64)
+		x, err := r.Read(subBuf)
+		n += x
+		if err != nil {
+			if err.Error() == "EOF" {
+				break
+			}
+			return int64(len(buf)), err
+		}
+		buf = append(buf, subBuf...)
 	}
 	srs.G2[0] = BytesToG2Affine(buf[:128])
 	srs.G2[1] = BytesToG2Affine(buf[128:256])
