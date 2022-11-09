@@ -17,11 +17,11 @@ import (
 )
 
 var (
-	ErrInvalidNbDigests              = errors.New("number of digests is not the same as the number of polynomials")
-	ErrInvalidPolynomialSize         = errors.New("invalid polynomial size (larger than SRS or == 0)")
-	ErrVerifyOpeningProof            = errors.New("can't verify opening proof")
-	ErrVerifyBatchOpeningSinglePoint = errors.New("can't verify batch opening proof at single point")
-	ErrMinSRSSize                    = errors.New("minimum srs size is 2")
+	ErrInvalidNbDigests              = errors.New("dkzg: number of digests is not the same as the number of polynomials")
+	ErrInvalidPolynomialSize         = errors.New("dkzg: invalid polynomial size (larger than SRS or == 0)")
+	ErrVerifyOpeningProof            = errors.New("dkzg: can't verify opening proof")
+	ErrVerifyBatchOpeningSinglePoint = errors.New("dkzg: can't verify batch opening proof at single point")
+	ErrMinSRSSize                    = errors.New("dkzg: minimum srs size is 2")
 )
 
 // Digest commitment of a polynomial.
