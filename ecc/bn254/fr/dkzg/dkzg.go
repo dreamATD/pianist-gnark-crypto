@@ -59,11 +59,11 @@ func lagrangeCalc(t int, tau0 fr.Element) fr.Element {
 	// BUG: side channel attack
 	omega.Exp(omega, omegaPow)
 
-	// R_i(t) = ((tau[0]^m - 1) * omega^t) / (m * (tau[0] - omega^t))
+	// R_t(tau0) = ((tau[0]^m - 1) * omega^t) / (m * (tau[0] - omega^t))
 	var lagTau0, omegaPowT, denominator fr.Element
 	omegaPowT.Exp(omega, big.NewInt(int64(t)))
 	one := fr.One()
-	denominator.Sub(&omegaPowT, &one).Mul(&denominator, mField)
+	denominator.Sub(&tau0, &omegaPowT).Mul(&denominator, mField)
 	lagTau0.Exp(tau0, m).Sub(&lagTau0, &one).Mul(&lagTau0, &omegaPowT).Div(&lagTau0, &denominator)
 	return lagTau0
 }
@@ -145,7 +145,6 @@ func Commit(p []fr.Element, srs *SRS, nbTasks ...int) (Digest, error) {
 		for i := 1; i < int(mpi.WorldSize); i++ {
 			subComBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, uint64(i))
 			if err != nil {
-				panic(err)
 				return Digest{}, err
 			}
 			subCom[i] = BytesToG1Affine(subComBytes)
@@ -389,7 +388,6 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 			wg.Done()
 		}(i)
 	}
-
 	// derive the challenge γ, binded to the point and the commitments
 	gamma, err := deriveGamma(point, digests, hf)
 	if err != nil {
@@ -452,6 +450,7 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 			allClaimedDigests[k][0] = claimedDigests[k]
 			for i := 1; i < int(mpi.WorldSize); i++ {
 				claimedValueBytes, err := mpi.ReceiveBytes(fr.Bytes, uint64(i))
+				fmt.Println("Received claimed value from", i, ":", claimedValueBytes)
 				if err != nil {
 					return BatchOpeningProof{}, nil, err
 				}
@@ -489,9 +488,12 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 		}, allClaimedValues, nil
 	}
 
+	fmt.Println("Other nodes")
+
 	// Other nodes
 	for k := 0; k < nbDigests; k++ {
 		claimedValueBytes := claimedValues[k].Bytes()
+		fmt.Println("Sending claimed value", claimedValues[k].String(), k)
 		if err := mpi.SendBytes(claimedValueBytes[:], 0); err != nil {
 			return BatchOpeningProof{}, nil, err
 		}
@@ -503,6 +505,7 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 	if err := mpi.SendBytes(G1AffineToBytes(comH), 0); err != nil {
 		return BatchOpeningProof{}, nil, err
 	}
+	fmt.Println("Other nodes done")
 	return BatchOpeningProof{}, nil, nil
 }
 

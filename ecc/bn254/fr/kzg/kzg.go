@@ -231,8 +231,6 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 	// check for invalid sizes
 	nbDigests := len(digests)
 	if nbDigests != len(polynomials) {
-
-		fmt.Println("Catch3")
 		return BatchOpeningProof{}, ErrInvalidNbDigests
 	}
 
@@ -503,7 +501,6 @@ func fold(di []Digest, fai []fr.Element, ci []fr.Element) (Digest, fr.Element, e
 func deriveGamma(point fr.Element, digests []Digest, hf hash.Hash) (fr.Element, error) {
 
 	// derive the challenge gamma, binded to the point and the commitments
-	
 	fs := fiatshamir.NewTranscript(hf, "gamma")
 	if err := fs.Bind("gamma", point.Marshal()); err != nil {
 		return fr.Element{}, err
