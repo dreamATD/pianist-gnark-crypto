@@ -2,10 +2,8 @@ package dkzg
 
 import (
 	"errors"
-	"fmt"
 	"hash"
 	"math/big"
-	"runtime/debug"
 	"sync"
 
 	"github.com/consensys/gnark-crypto/ecc"
@@ -45,23 +43,24 @@ func eval(p []fr.Element, point fr.Element) fr.Element {
 }
 
 func init() {
-	mpi.WorldInit("ip.txt", "/home/farmer/.ssh/id_rsa", "farmer")
+	mpi.WorldInit("/home/tianyi/gnark/examples/piano/ip.txt", "/home/tianyi/.ssh/id_ed25519", "tianyi")
 }
 
-func lagrangeCalc(t int, tau0 fr.Element) fr.Element {
+func lagrangeCalc(t uint64, tau0 fr.Element, omega *fr.Element) fr.Element {
 	m := big.NewInt(int64(mpi.WorldSize))
 	mField := new(fr.Element).SetBigInt(m)
-	fieldSize := fr.Modulus()
-	multiplicativeGroupSize := new(big.Int).Sub(fieldSize, big.NewInt(1))
-	omegaPow := new(big.Int).Div(multiplicativeGroupSize, m)
-	omegaBigInt, _ := new(big.Int).SetString("19103219067921713944291392827692070036145651957329286315305642004821462161904", 10)
-	omega := *new(fr.Element).SetBigInt(omegaBigInt)
-	// BUG: side channel attack
-	omega.Exp(omega, omegaPow)
-
+	if omega == nil {
+		fieldSize := fr.Modulus()
+		multiplicativeGroupSize := new(big.Int).Sub(fieldSize, big.NewInt(1))
+		omegaPow := new(big.Int).Div(multiplicativeGroupSize, m)
+		omegaBigInt, _ := new(big.Int).SetString("19103219067921713944291392827692070036145651957329286315305642004821462161904", 10)
+		omega := *new(fr.Element).SetBigInt(omegaBigInt)
+		// BUG: side channel attack
+		omega.Exp(omega, omegaPow)
+	}
 	// R_t(tau0) = ((tau[0]^m - 1) * omega^t) / (m * (tau[0] - omega^t))
 	var lagTau0, omegaPowT, denominator fr.Element
-	omegaPowT.Exp(omega, big.NewInt(int64(t)))
+	omegaPowT.Exp(*omega, big.NewInt(int64(t)))
 	one := fr.One()
 	denominator.Sub(&tau0, &omegaPowT).Mul(&denominator, mField)
 	lagTau0.Exp(tau0, m).Sub(&lagTau0, &one).Mul(&lagTau0, &omegaPowT).Div(&lagTau0, &denominator)
@@ -73,14 +72,12 @@ func lagrangeCalc(t int, tau0 fr.Element) fr.Element {
 // In production, a SRS generated through MPC should be used.
 //
 // implements io.ReaderFrom and io.WriterTo
-func NewSRS(size uint64, tau []*big.Int) (*SRS, error) {
+func NewSRS(size uint64, tau []*big.Int, domainGenY *fr.Element) (*SRS, error) {
 
 	_, _, gen1Aff, gen2Aff := bn254.Generators()
-	t := mpi.SelfRank
-
 	tau0 := new(fr.Element).SetBigInt(tau[0])
 	// Lagrange Polynomial
-	lagTau0 := lagrangeCalc(int(t), *tau0)
+	lagTau0 := lagrangeCalc(mpi.SelfRank, *tau0, domainGenY)
 
 	var srs SRS
 
@@ -95,9 +92,8 @@ func NewSRS(size uint64, tau []*big.Int) (*SRS, error) {
 	srs.G1 = make([]bn254.G1Affine, size)
 	srs.G1[0].ScalarMultiplication(&gen1Aff, lagBigInt)
 
-	alphas := make([]fr.Element, size-1)
-	alphas[0] = alpha
-	alphas[0].Mul(&alphas[0], &lagTau0)
+	alphas := make([]fr.Element, size)
+	alphas[0].SetBigInt(lagBigInt)
 	for i := 1; i < len(alphas); i++ {
 		alphas[i].Mul(&alphas[i-1], &alpha)
 	}
@@ -105,7 +101,7 @@ func NewSRS(size uint64, tau []*big.Int) (*SRS, error) {
 		alphas[i].FromMont()
 	}
 	g1s := bn254.BatchScalarMultiplicationG1(&gen1Aff, alphas)
-	copy(srs.G1[1:], g1s)
+	copy(srs.G1, g1s)
 	return &srs, nil
 }
 
@@ -122,7 +118,6 @@ func Commit(p []fr.Element, srs *SRS, nbTasks ...int) (Digest, error) {
 	// and sends the final commitment to all compute nodes
 
 	if len(p) == 0 || len(p) > len(srs.G1) {
-		fmt.Println(string(debug.Stack()))
 		return Digest{}, ErrInvalidPolynomialSize
 	}
 
@@ -202,7 +197,6 @@ F(\tau[0], \tau[1]) - F(x, \tau[1]) / (\tau[0] - x) = h(x)
 */
 func Open(p []fr.Element, y fr.Element, srs *SRS, nbTasks ...int) (OpeningProof, []fr.Element, error) {
 	if len(p) == 0 || len(p) > len(srs.G1) {
-		fmt.Println(string(debug.Stack()))
 		return OpeningProof{}, nil, ErrInvalidPolynomialSize
 	}
 
@@ -366,7 +360,6 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 	largestPoly := -1
 	for _, p := range polynomials {
 		if len(p) == 0 || len(p) > len(srs.G1) {
-			fmt.Println(string(debug.Stack()))
 			return BatchOpeningProof{}, nil, ErrInvalidPolynomialSize
 		}
 		if len(p) > largestPoly {
@@ -450,7 +443,6 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 			allClaimedDigests[k][0] = claimedDigests[k]
 			for i := 1; i < int(mpi.WorldSize); i++ {
 				claimedValueBytes, err := mpi.ReceiveBytes(fr.Bytes, uint64(i))
-				fmt.Println("Received claimed value from", i, ":", claimedValueBytes)
 				if err != nil {
 					return BatchOpeningProof{}, nil, err
 				}
@@ -463,6 +455,13 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 			}
 		}
 
+		for k := range allClaimedDigests {
+			claimedDigests[k] = allClaimedDigests[k][0]
+			for i := 1; i < int(mpi.WorldSize); i++ {
+				claimedDigests[k].Add(&claimedDigests[k], &allClaimedDigests[k][i])
+			}
+		}
+
 		for i := 1; i < int(mpi.WorldSize); i++ {
 			comHBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, uint64(i))
 			if err != nil {
@@ -471,12 +470,6 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 			allComH[i] = BytesToG1Affine(comHBytes)
 		}
 
-		for k := range allClaimedValues {
-			claimedDigests[k] = allClaimedDigests[k][0]
-			for i := 1; i < int(mpi.WorldSize); i++ {
-				claimedDigests[k].Add(&claimedDigests[k], &allClaimedDigests[k][i])
-			}
-		}
 		comH = allComH[0]
 		for i := 1; i < int(mpi.WorldSize); i++ {
 			comH.Add(&comH, &allComH[i])
@@ -488,12 +481,9 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 		}, allClaimedValues, nil
 	}
 
-	fmt.Println("Other nodes")
-
 	// Other nodes
 	for k := 0; k < nbDigests; k++ {
 		claimedValueBytes := claimedValues[k].Bytes()
-		fmt.Println("Sending claimed value", claimedValues[k].String(), k)
 		if err := mpi.SendBytes(claimedValueBytes[:], 0); err != nil {
 			return BatchOpeningProof{}, nil, err
 		}
@@ -505,7 +495,6 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 	if err := mpi.SendBytes(G1AffineToBytes(comH), 0); err != nil {
 		return BatchOpeningProof{}, nil, err
 	}
-	fmt.Println("Other nodes done")
 	return BatchOpeningProof{}, nil, nil
 }
 
@@ -520,14 +509,12 @@ func FoldProof(digests []Digest, batchOpeningProof *BatchOpeningProof, point fr.
 
 	// check consistancy between numbers of claims vs number of digests
 	if nbDigests != len(batchOpeningProof.ClaimedDigests) {
-		fmt.Println("Catch")
 		return OpeningProof{}, Digest{}, ErrInvalidNbDigests
 	}
 
 	// derive the challenge γ, binded to the point and the commitments
 	gamma, err := deriveGamma(point, digests, hf)
 	if err != nil {
-		fmt.Println("Catch2")
 		return OpeningProof{}, Digest{}, ErrInvalidNbDigests
 	}
 
@@ -557,7 +544,15 @@ func FoldProof(digests []Digest, batchOpeningProof *BatchOpeningProof, point fr.
 // * digests list of digests on which opening proof is done
 // * batchOpeningProof proof of correct opening on the digests
 func BatchVerifySinglePoint(digests []Digest, batchOpeningProof *BatchOpeningProof, point fr.Element, hf hash.Hash, srs *SRS) error {
-	return fmt.Errorf("not implemented")
+	// fold the proof
+	foldedProof, foldedDigest, err := FoldProof(digests, batchOpeningProof, point, hf)
+	if err != nil {
+		return err
+	}
+
+	// verify the foldedProof againts the foldedDigest
+	err = Verify(&foldedDigest, &foldedProof, point, srs)
+	return err
 }
 
 // BatchVerifyMultiPoints batch verifies a list of opening proofs at different points.
@@ -657,17 +652,9 @@ func BatchVerifyMultiPoints(digests []Digest, proofs []OpeningProof, points []fr
 //
 // * Returns ∑ᵢcᵢdᵢ, ∑ᵢcᵢf(aᵢ)
 func fold(di []Digest, fai []bn254.G1Affine, ci []fr.Element) (Digest, Digest, error) {
-	// length inconsistancy between digests and evaluations should have been done before calling this function
-	nbDigests := len(di)
-
 	// fold the claimed values ∑ᵢcᵢf(aᵢ)
-	var foldedEvaluations, tmp bn254.G1Affine
-	for i := 0; i < nbDigests; i++ {
-		var ciBigInt big.Int
-		ci[i].ToBigIntRegular(&ciBigInt)
-		tmp.ScalarMultiplication(&fai[i], &ciBigInt)
-		foldedEvaluations.Add(&foldedEvaluations, &tmp)
-	}
+	var foldedEvaluations bn254.G1Affine
+	foldedEvaluations.MultiExp(fai, ci, ecc.MultiExpConfig{ScalarsMont: true})
 
 	// fold the digests ∑ᵢ[cᵢ]([fᵢ(α)]G₁)
 	var foldedDigests Digest

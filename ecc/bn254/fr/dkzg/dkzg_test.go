@@ -19,20 +19,66 @@ package dkzg
 import (
 	"bytes"
 	"crypto/sha256"
+	"fmt"
 	"math/big"
 	"reflect"
 	"testing"
 
 	"github.com/consensys/gnark-crypto/ecc"
+	"github.com/consensys/gnark-crypto/ecc/bn254"
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
+	"github.com/sunblaze-ucb/simpleMPI/mpi"
 )
 
 // testSRS re-used accross tests of the KZG scheme
-var testSRS *SRS
+var testSRS []*SRS
+const srsSize = 230
 
 func init() {
-	const srsSize = 230
-	testSRS, _ = NewSRS(ecc.NextPowerOfTwo(srsSize), []*big.Int{big.NewInt(42), big.NewInt(27)})
+	testSRS = make([]*SRS, mpi.WorldSize)
+	for i := 0; i < int(mpi.WorldSize); i++ {
+		var err error
+		testSRS[i], err = newSRS(ecc.NextPowerOfTwo(srsSize), []*big.Int{big.NewInt(42), big.NewInt(int64(27))}, uint64(i))
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
+func newSRS(size uint64, tau []*big.Int, num uint64) (*SRS, error) {
+
+	_, _, gen1Aff, gen2Aff := bn254.Generators()
+	t := num
+
+	tau0 := new(fr.Element).SetBigInt(tau[0])
+	// Lagrange Polynomial
+	lagTau0 := lagrangeCalc(t, *tau0, nil)
+
+	var srs SRS
+
+	var alpha fr.Element
+	alpha.SetBigInt(tau[1])
+
+	srs.G2[0] = gen2Aff
+	srs.G2[1].ScalarMultiplication(&gen2Aff, tau[1])
+
+	lagBigInt := new(big.Int)
+	lagTau0.ToBigIntRegular(lagBigInt)
+	srs.G1 = make([]bn254.G1Affine, size)
+	srs.G1[0].ScalarMultiplication(&gen1Aff, lagBigInt)
+
+	alphas := make([]fr.Element, size-1)
+	alphas[0] = alpha
+	alphas[0].Mul(&alphas[0], &lagTau0)
+	for i := 1; i < len(alphas); i++ {
+		alphas[i].Mul(&alphas[i-1], &alpha)
+	}
+	for i := 0; i < len(alphas); i++ {
+		alphas[i].FromMont()
+	}
+	g1s := bn254.BatchScalarMultiplicationG1(&gen1Aff, alphas)
+	copy(srs.G1[1:], g1s)
+	return &srs, nil
 }
 
 func TestDividePolyByXminusA(t *testing.T) {
@@ -79,7 +125,7 @@ func TestDividePolyByXminusA(t *testing.T) {
 func TestSerializationSRS(t *testing.T) {
 
 	// create a SRS
-	srs, err := NewSRS(64, []*big.Int{big.NewInt(42), big.NewInt(27)})
+	srs, err := NewSRS(64, []*big.Int{big.NewInt(42), big.NewInt(27)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,29 +157,128 @@ func TestSerializationSRS(t *testing.T) {
 
 func TestCommit(t *testing.T) {
 
+	// create a polynomial
+	f := polynomial(60, mpi.SelfRank)
+
+	fmt.Println("poly", mpi.SelfRank)
+	for i := 0; i < len(f); i++ {
+		fmt.Print(f[i], " ")
+	}
+	fmt.Println()
+
+	// commit using the method from KZG
+	kzgCommit, err := Commit(f, testSRS[mpi.SelfRank])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mpi.SelfRank != 0 {
+		return
+	}
+
+	// check commitment using manual commit
+	var x fr.Element
+	x.SetString("27")
+
+	ps := make([][]fr.Element, mpi.WorldSize)
+	es := make([]fr.Element, mpi.WorldSize)
+	bs := make([]bn254.G1Affine, mpi.WorldSize)
+	for i := 0; i < int(mpi.WorldSize); i++ {
+		ps[i] = polynomial(60, uint64(i))
+		es[i] = eval(ps[i], x)
+		bs[i] = testSRS[i].G1[0]
+	}
+	
+	config := ecc.MultiExpConfig{ScalarsMont: true}
+	var manualCommit bn254.G1Affine
+	if _, err = manualCommit.MultiExp(bs, es, config); err != nil {
+		t.Fatal(err)
+	}
+
+	// compare both results
+	if !kzgCommit.Equal(&manualCommit) {
+		t.Fatal("error KZG commitment")
+	}
 }
 
 func TestVerifySinglePoint(t *testing.T) {
 
-}
+	// create a polynomial
+	f := polynomial(60, mpi.SelfRank)
 
-func TestBatchVerifySinglePoint(t *testing.T) {
+	// commit the polynomial
+	digest, err := Commit(f, testSRS[mpi.SelfRank])
+	if err != nil {
+		t.Fatal(err)
+	}
 
-}
+	// compute opening proof at a random point
+	var point fr.Element
+	point.SetString("4321")
+	proof, _, err := Open(f, point, testSRS[mpi.SelfRank])
+	if err != nil {
+		t.Fatal(err)
+	}
 
-func TestBatchVerifyMultiPoints(t *testing.T) {
+	if mpi.SelfRank != 0 {
+		return
+	}
 
+	ps := make([][]fr.Element, mpi.WorldSize)
+	es := make([]fr.Element, mpi.WorldSize)
+	bs := make([]bn254.G1Affine, mpi.WorldSize)
+	for i := 0; i < int(mpi.WorldSize); i++ {
+		ps[i] = polynomial(60, uint64(i))
+		es[i] = eval(ps[i], point)
+		bs[i] = testSRS[i].G1[0]
+	}
+
+	var expectedGroup bn254.G1Affine
+	if _, err := expectedGroup.MultiExp(bs, es, ecc.MultiExpConfig{ScalarsMont: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	// verify the claimed valued
+	if !proof.ClaimedDigest.Equal(&expectedGroup) {
+		t.Fatal("inconsistant claimed value")
+	}
+
+	// verify correct proof
+	err = Verify(&digest, &proof, point, testSRS[mpi.SelfRank])
+	if err != nil {
+		t.Fatal(err)
+	}
+	{
+		// verify wrong proof
+		var nexpectedGroup bn254.G1Affine
+		nexpectedGroup.Add(&expectedGroup, &expectedGroup)
+		proof.ClaimedDigest = nexpectedGroup
+
+		err = Verify(&digest, &proof, point, testSRS[mpi.SelfRank])
+		if err == nil {
+			t.Fatal("verifying wrong proof should have failed")
+		}
+	}
+	{
+		// verify wrong proof with quotient set to zero
+		// see https://cryptosubtlety.medium.com/00-8d4adcf4d255
+		proof.H.X.SetZero()
+		proof.H.Y.SetZero()
+		err = Verify(&digest, &proof, point, testSRS[mpi.SelfRank])
+		if err == nil {
+			t.Fatal("verifying wrong proof should have failed")
+		}
+	}
 }
 
 const benchSize = 1 << 16
 
 func BenchmarkKZGCommit(b *testing.B) {
-	benchSRS, err := NewSRS(ecc.NextPowerOfTwo(benchSize), []*big.Int{big.NewInt(42), big.NewInt(27)})
+	benchSRS, err := NewSRS(ecc.NextPowerOfTwo(benchSize), []*big.Int{big.NewInt(42), big.NewInt(27)}, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
 	// random polynomial
-	p := randomPolynomial(benchSize / 2)
+	p := polynomial(benchSize / 2, mpi.SelfRank)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -163,13 +308,13 @@ func BenchmarkDivideByXMinusA(b *testing.B) {
 }
 
 func BenchmarkKZGOpen(b *testing.B) {
-	benchSRS, err := NewSRS(ecc.NextPowerOfTwo(benchSize), []*big.Int{big.NewInt(42), big.NewInt(27)})
+	benchSRS, err := NewSRS(ecc.NextPowerOfTwo(benchSize), []*big.Int{big.NewInt(42), big.NewInt(27)}, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
 
 	// random polynomial
-	p := randomPolynomial(benchSize / 2)
+	p := polynomial(benchSize / 2, mpi.SelfRank)
 	var r fr.Element
 	r.SetRandom()
 
@@ -180,13 +325,13 @@ func BenchmarkKZGOpen(b *testing.B) {
 }
 
 func BenchmarkKZGVerify(b *testing.B) {
-	benchSRS, err := NewSRS(ecc.NextPowerOfTwo(benchSize), []*big.Int{big.NewInt(42), big.NewInt(27)})
+	benchSRS, err := NewSRS(ecc.NextPowerOfTwo(benchSize), []*big.Int{big.NewInt(42), big.NewInt(27)}, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
 
 	// random polynomial
-	p := randomPolynomial(benchSize / 2)
+	p := polynomial(benchSize / 2, mpi.SelfRank)
 	var r fr.Element
 	r.SetRandom()
 
@@ -212,7 +357,7 @@ func BenchmarkKZGVerify(b *testing.B) {
 }
 
 func BenchmarkKZGBatchOpen10(b *testing.B) {
-	benchSRS, err := NewSRS(ecc.NextPowerOfTwo(benchSize), []*big.Int{big.NewInt(42), big.NewInt(27)})
+	benchSRS, err := NewSRS(ecc.NextPowerOfTwo(benchSize), []*big.Int{big.NewInt(42), big.NewInt(27)}, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -220,7 +365,7 @@ func BenchmarkKZGBatchOpen10(b *testing.B) {
 	// 10 random polynomials
 	var ps [10][]fr.Element
 	for i := 0; i < 10; i++ {
-		ps[i] = randomPolynomial(benchSize / 2)
+		ps[i] = polynomial(benchSize / 2, mpi.SelfRank)
 	}
 
 	// commitments
@@ -245,7 +390,7 @@ func BenchmarkKZGBatchOpen10(b *testing.B) {
 }
 
 func BenchmarkKZGBatchVerify10(b *testing.B) {
-	benchSRS, err := NewSRS(ecc.NextPowerOfTwo(benchSize), []*big.Int{big.NewInt(42), big.NewInt(27)})
+	benchSRS, err := NewSRS(ecc.NextPowerOfTwo(benchSize), []*big.Int{big.NewInt(42), big.NewInt(27)}, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -253,7 +398,7 @@ func BenchmarkKZGBatchVerify10(b *testing.B) {
 	// 10 random polynomials
 	var ps [10][]fr.Element
 	for i := 0; i < 10; i++ {
-		ps[i] = randomPolynomial(benchSize / 2)
+		ps[i] = polynomial(benchSize / 2, mpi.SelfRank)
 	}
 
 	// commitments
@@ -282,10 +427,12 @@ func BenchmarkKZGBatchVerify10(b *testing.B) {
 	}
 }
 
-func randomPolynomial(size int) []fr.Element {
+func polynomial(size int, num uint64) []fr.Element {
 	f := make([]fr.Element, size)
 	for i := 0; i < size; i++ {
-		f[i].SetRandom()
+		tmp := fr.NewElement(num)
+		tmp2 := fr.NewElement(uint64(i))
+		f[i].Add(&tmp2, &tmp)
 	}
 	return f
 }
