@@ -234,10 +234,8 @@ func Open(p []fr.Element, y fr.Element, srs *SRS, nbTasks ...int) (OpeningProof,
 		// Root node
 		allFY := make([]fr.Element, mpi.WorldSize)
 		allComFY := make([]bn254.G1Affine, mpi.WorldSize)
-		allComH := make([]bn254.G1Affine, mpi.WorldSize)
 		allFY[0] = fY
 		allComFY[0] = comFY
-		allComH[0] = comH
 		for i := 1; i < int(mpi.WorldSize); i++ {
 			fYBytes, err := mpi.ReceiveBytes(fr.Bytes, uint64(i))
 			if err != nil {
@@ -249,20 +247,11 @@ func Open(p []fr.Element, y fr.Element, srs *SRS, nbTasks ...int) (OpeningProof,
 				return OpeningProof{}, nil, err
 			}
 			allComFY[i] = BytesToG1Affine(comFyBytes)
-			comHBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, uint64(i))
-			if err != nil {
-				return OpeningProof{}, nil, err
-			}
-			allComH[i] = BytesToG1Affine(comHBytes)
 		}
 
 		comFY = allComFY[0]
 		for i := 1; i < int(mpi.WorldSize); i++ {
 			comFY.Add(&comFY, &allComFY[i])
-		}
-		comH = allComH[0]
-		for i := 1; i < int(mpi.WorldSize); i++ {
-			comH.Add(&comH, &allComH[i])
 		}
 
 		return OpeningProof{
@@ -277,9 +266,6 @@ func Open(p []fr.Element, y fr.Element, srs *SRS, nbTasks ...int) (OpeningProof,
 		return OpeningProof{}, nil, err
 	}
 	if err := mpi.SendBytes(G1AffineToBytes(comFY), 0); err != nil {
-		return OpeningProof{}, nil, err
-	}
-	if err := mpi.SendBytes(G1AffineToBytes(comH), 0); err != nil {
 		return OpeningProof{}, nil, err
 	}
 	return OpeningProof{}, nil, nil
@@ -434,8 +420,6 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 		// Root node
 		allClaimedValues := make([][]fr.Element, nbDigests)
 		allClaimedDigests := make([][]bn254.G1Affine, nbDigests)
-		allComH := make([]bn254.G1Affine, mpi.WorldSize)
-		allComH[0] = comH
 		for k := 0; k < nbDigests; k++ {
 			allClaimedValues[k] = make([]fr.Element, mpi.WorldSize)
 			allClaimedDigests[k] = make([]bn254.G1Affine, mpi.WorldSize)
@@ -462,19 +446,6 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 			}
 		}
 
-		for i := 1; i < int(mpi.WorldSize); i++ {
-			comHBytes, err := mpi.ReceiveBytes(bn254.SizeOfG1AffineUncompressed, uint64(i))
-			if err != nil {
-				return BatchOpeningProof{}, nil, err
-			}
-			allComH[i] = BytesToG1Affine(comHBytes)
-		}
-
-		comH = allComH[0]
-		for i := 1; i < int(mpi.WorldSize); i++ {
-			comH.Add(&comH, &allComH[i])
-		}
-
 		return BatchOpeningProof{
 			H:              comH,
 			ClaimedDigests: claimedDigests,
@@ -491,9 +462,6 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 			return BatchOpeningProof{}, nil, err
 		}
 
-	}
-	if err := mpi.SendBytes(G1AffineToBytes(comH), 0); err != nil {
-		return BatchOpeningProof{}, nil, err
 	}
 	return BatchOpeningProof{}, nil, nil
 }
