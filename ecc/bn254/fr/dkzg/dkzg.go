@@ -393,9 +393,9 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 	foldedPolynomials := make([]fr.Element, largestPoly)
 	copy(foldedPolynomials, polynomials[0])
 	acc := gamma
-	var pj fr.Element
 	for i := 1; i < len(polynomials); i++ {
 		parallel.Execute(len(polynomials[i]), func(start, end int) {
+			var pj fr.Element
 			for j := start; j < end; j++ {
 				pj.Mul(&polynomials[i][j], &acc)
 				foldedPolynomials[j].Add(&foldedPolynomials[j], &pj)
