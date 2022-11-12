@@ -270,6 +270,88 @@ func TestVerifySinglePoint(t *testing.T) {
 	}
 }
 
+func TestBatchOpenSinglePoint(t *testing.T) {
+	// create a polynomial
+	num := 10
+	fs := make([][]fr.Element, num)
+	digests := make([]bn254.G1Affine, num)
+	
+	var err error
+	for i := 0; i < num; i++ {
+		fs[i] = polynomial(60, mpi.SelfRank, i)
+		digests[i], err = Commit(fs[i], testSRS[mpi.SelfRank])
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// compute opening proof at a random point
+	var point fr.Element
+	point.SetString("4321")
+	hfunc := sha256.New()
+	proof, evals, err := BatchOpenSinglePoint(fs, digests, point, hfunc, testSRS[mpi.SelfRank])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if mpi.SelfRank != 0 {
+		return
+	}
+
+	ps := make([][][]fr.Element, num)
+	es := make([][]fr.Element, num)
+	bs := make([]bn254.G1Affine, mpi.WorldSize)
+	for i := 0; i < num; i++ {
+		ps[i] = make([][]fr.Element, mpi.WorldSize)
+		es[i] = make([]fr.Element, mpi.WorldSize)
+		for j := 0; j < int(mpi.WorldSize); j++ {
+			ps[i][j] = polynomial(60, uint64(j), i)
+			es[i][j] = eval(ps[i][j], point)
+			if !es[i][j].Equal(&evals[i][j]) {
+				t.Fatal("inconsistant evals")
+			}
+		}
+	}
+
+	for i := 0; i < int(mpi.WorldSize); i++ {
+		bs[i] = testSRS[i].G1[0]
+	}
+
+	expectedGroups := make([]bn254.G1Affine, num)
+	for i := 0; i < num; i++ {
+		if _, err := expectedGroups[i].MultiExp(bs, es[i], ecc.MultiExpConfig{ScalarsMont: true}); err != nil {
+			t.Fatal(err)
+		}
+		if !proof.ClaimedDigests[i].Equal(&expectedGroups[i]) {
+			t.Fatal("inconsistant claimed digests for evaluation")
+		}
+	}
+
+	// verify correct proof
+	if err := BatchVerifySinglePoint(digests, &proof, point, hfunc, testSRS[mpi.SelfRank]); err != nil {
+		t.Fatal(err)
+	}
+	{
+		// verify wrong proof
+		var nexpectedGroup bn254.G1Affine
+		nexpectedGroup.Add(&proof.ClaimedDigests[0], &proof.ClaimedDigests[0])
+		proof.ClaimedDigests[0] = nexpectedGroup
+
+		if err := BatchVerifySinglePoint(digests, &proof, point, hfunc, testSRS[mpi.SelfRank]); err == nil {
+			t.Fatal("verifying wrong claimed digests should have failed")
+		}
+	}
+	{
+		// verify wrong proof with quotient set to zero
+		// see https://cryptosubtlety.medium.com/00-8d4adcf4d255
+		proof.H.X.SetZero()
+		proof.H.Y.SetZero()
+		if err := BatchVerifySinglePoint(digests, &proof, point, hfunc, testSRS[mpi.SelfRank]); err == nil {
+			t.Fatal("verifying wrong quotient digest should have failed")
+		}
+	}
+}
+
 const benchSize = 1 << 16
 
 func BenchmarkKZGCommit(b *testing.B) {
@@ -427,12 +509,16 @@ func BenchmarkKZGBatchVerify10(b *testing.B) {
 	}
 }
 
-func polynomial(size int, num uint64) []fr.Element {
+func polynomial(size int, num uint64, idx ...int) []fr.Element {
 	f := make([]fr.Element, size)
 	for i := 0; i < size; i++ {
 		tmp := fr.NewElement(num)
 		tmp2 := fr.NewElement(uint64(i))
 		f[i].Add(&tmp2, &tmp)
+		if len(idx) > 0 {
+			tmp3 := fr.NewElement(uint64(idx[0] * 3 + 1))
+			f[i].Add(&f[i], &tmp3)
+		}
 	}
 	return f
 }

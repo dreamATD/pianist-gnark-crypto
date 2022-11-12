@@ -54,9 +54,9 @@ func lagrangeCalc(t uint64, tau0 fr.Element, omega *fr.Element) fr.Element {
 		multiplicativeGroupSize := new(big.Int).Sub(fieldSize, big.NewInt(1))
 		omegaPow := new(big.Int).Div(multiplicativeGroupSize, m)
 		omegaBigInt, _ := new(big.Int).SetString("19103219067921713944291392827692070036145651957329286315305642004821462161904", 10)
-		omega := *new(fr.Element).SetBigInt(omegaBigInt)
+		omega = new(fr.Element).SetBigInt(omegaBigInt)
 		// BUG: side channel attack
-		omega.Exp(omega, omegaPow)
+		omega.Exp(*omega, omegaPow)
 	}
 	// R_t(tau0) = ((tau[0]^m - 1) * omega^t) / (m * (tau[0] - omega^t))
 	var lagTau0, omegaPowT, denominator fr.Element
