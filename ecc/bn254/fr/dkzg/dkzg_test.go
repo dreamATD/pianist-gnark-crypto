@@ -32,6 +32,7 @@ import (
 
 // testSRS re-used accross tests of the KZG scheme
 var testSRS []*SRS
+
 const srsSize = 230
 
 func init() {
@@ -187,7 +188,7 @@ func TestCommit(t *testing.T) {
 		es[i] = eval(ps[i], x)
 		bs[i] = testSRS[i].G1[0]
 	}
-	
+
 	config := ecc.MultiExpConfig{ScalarsMont: true}
 	var manualCommit bn254.G1Affine
 	if _, err = manualCommit.MultiExp(bs, es, config); err != nil {
@@ -275,7 +276,7 @@ func TestBatchOpenSinglePoint(t *testing.T) {
 	num := 10
 	fs := make([][]fr.Element, num)
 	digests := make([]bn254.G1Affine, num)
-	
+
 	var err error
 	for i := 0; i < num; i++ {
 		fs[i] = polynomial(60, mpi.SelfRank, i)
@@ -360,7 +361,7 @@ func BenchmarkKZGCommit(b *testing.B) {
 		b.Fatal(err)
 	}
 	// random polynomial
-	p := polynomial(benchSize / 2, mpi.SelfRank)
+	p := polynomial(benchSize/2, mpi.SelfRank)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -396,7 +397,7 @@ func BenchmarkKZGOpen(b *testing.B) {
 	}
 
 	// random polynomial
-	p := polynomial(benchSize / 2, mpi.SelfRank)
+	p := polynomial(benchSize/2, mpi.SelfRank)
 	var r fr.Element
 	r.SetRandom()
 
@@ -413,7 +414,7 @@ func BenchmarkKZGVerify(b *testing.B) {
 	}
 
 	// random polynomial
-	p := polynomial(benchSize / 2, mpi.SelfRank)
+	p := polynomial(benchSize/2, mpi.SelfRank)
 	var r fr.Element
 	r.SetRandom()
 
@@ -447,7 +448,7 @@ func BenchmarkKZGBatchOpen10(b *testing.B) {
 	// 10 random polynomials
 	var ps [10][]fr.Element
 	for i := 0; i < 10; i++ {
-		ps[i] = polynomial(benchSize / 2, mpi.SelfRank)
+		ps[i] = polynomial(benchSize/2, mpi.SelfRank)
 	}
 
 	// commitments
@@ -480,7 +481,7 @@ func BenchmarkKZGBatchVerify10(b *testing.B) {
 	// 10 random polynomials
 	var ps [10][]fr.Element
 	for i := 0; i < 10; i++ {
-		ps[i] = polynomial(benchSize / 2, mpi.SelfRank)
+		ps[i] = polynomial(benchSize/2, mpi.SelfRank)
 	}
 
 	// commitments
@@ -516,7 +517,7 @@ func polynomial(size int, num uint64, idx ...int) []fr.Element {
 		tmp2 := fr.NewElement(uint64(i))
 		f[i].Add(&tmp2, &tmp)
 		if len(idx) > 0 {
-			tmp3 := fr.NewElement(uint64(idx[0] * 3 + 1))
+			tmp3 := fr.NewElement(uint64(idx[0]*3 + 1))
 			f[i].Add(&f[i], &tmp3)
 		}
 	}
