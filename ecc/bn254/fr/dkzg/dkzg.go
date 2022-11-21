@@ -369,7 +369,7 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 		}(i)
 	}
 	// derive the challenge γ, binded to the point and the commitments
-	gamma, err := deriveGamma(point, digests, hf)
+	gamma, err := deriveGamma(point, digests, hf, false)
 	if err != nil {
 		return BatchOpeningProof{}, nil, err
 	}
@@ -482,7 +482,7 @@ func FoldProof(digests []Digest, batchOpeningProof *BatchOpeningProof, point fr.
 	}
 
 	// derive the challenge γ, binded to the point and the commitments
-	gamma, err := deriveGamma(point, digests, hf)
+	gamma, err := deriveGamma(point, digests, hf, true)
 	if err != nil {
 		return OpeningProof{}, Digest{}, ErrInvalidNbDigests
 	}
@@ -638,7 +638,7 @@ func fold(di []Digest, fai []bn254.G1Affine, ci []fr.Element) (Digest, Digest, e
 }
 
 // deriveGamma derives a challenge using Fiat Shamir to fold proofs.
-func deriveGamma(point fr.Element, digests []Digest, hf hash.Hash) (fr.Element, error) {
+func deriveGamma(point fr.Element, digests []Digest, hf hash.Hash, notSend bool) (fr.Element, error) {
 	if mpi.SelfRank == 0 {
 		// derive the challenge gamma, binded to the point and the commitments
 		fs := fiatshamir.NewTranscript(hf, "gamma")
@@ -656,6 +656,10 @@ func deriveGamma(point fr.Element, digests []Digest, hf hash.Hash) (fr.Element, 
 		}
 		var gamma fr.Element
 		gamma.SetBytes(gammaByte)
+		gammaByte = nil
+		if notSend {
+			return gamma, nil
+		}
 		buf := gamma.Bytes()
 		for i := 1; i < int(mpi.WorldSize); i++ {
 			mpi.SendBytes(buf[:], uint64(i))
