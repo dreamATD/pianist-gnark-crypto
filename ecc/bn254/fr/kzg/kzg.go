@@ -120,7 +120,6 @@ type BatchOpeningProof struct {
 // Commit commits to a polynomial using a multi exponentiation with the SRS.
 // It is assumed that the polynomial is in canonical form, in Montgomery form.
 func Commit(p []fr.Element, srs *SRS, nbTasks ...int) (Digest, error) {
-
 	if len(p) == 0 || len(p) > len(srs.G1) {
 		fmt.Println(string(debug.Stack()))
 		fmt.Println(len(p), len(srs.G1))

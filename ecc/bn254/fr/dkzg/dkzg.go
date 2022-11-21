@@ -2,6 +2,7 @@ package dkzg
 
 import (
 	"errors"
+	"fmt"
 	"hash"
 	"math/big"
 	"sync"
@@ -43,7 +44,7 @@ func eval(p []fr.Element, point fr.Element) fr.Element {
 }
 
 func init() {
-	mpi.WorldInit("/home/tianyi/gnark/examples/piano/ip.txt", "/home/tianyi/.ssh/id_ed25519", "tianyi")
+	mpi.WorldInit("/home/farmer/gnark/examples/circomR1CS/ip.txt", "/home/farmer/.ssh/id_rsa", "farmer")
 }
 
 func lagrangeCalc(t uint64, tau0 fr.Element, omega *fr.Element) fr.Element {
@@ -73,7 +74,7 @@ func lagrangeCalc(t uint64, tau0 fr.Element, omega *fr.Element) fr.Element {
 //
 // implements io.ReaderFrom and io.WriterTo
 func NewSRS(size uint64, tau []*big.Int, domainGenY *fr.Element) (*SRS, error) {
-
+	fmt.Println("NewSRS", size)
 	_, _, gen1Aff, gen2Aff := bn254.Generators()
 	tau0 := new(fr.Element).SetBigInt(tau[0])
 	// Lagrange Polynomial
@@ -107,11 +108,11 @@ func NewSRS(size uint64, tau []*big.Int, domainGenY *fr.Element) (*SRS, error) {
 
 /*
 The distributed commit algorithm computes the following:
-	1. Each node has a polynomial f_i(y).
-	2. The commit algorithm commits to: F(x, y) = \sum_{i=0}^{M-1} f_i(y) * L_i(x), where L_i(x) is the Lagrange polynomial of i.
-	3. The commitment is g^{F(\tau[0], \tau[1])} = \Pi_{i=0}^{M-1} g^{f_i(\tau[1]) * L_i(\tau[0])} = \Pi_{i=0}^{M-1}\Pi_{j=0}^{N-1}f_{i, j} * U^{L_i(\tau[0])*\tau[1]^j}.
+ 1. Each node has a polynomial f_i(y).
+ 2. The commit algorithm commits to: F(x, y) = \sum_{i=0}^{M-1} f_i(y) * L_i(x), where L_i(x) is the Lagrange polynomial of i.
+ 3. The commitment is g^{F(\tau[0], \tau[1])} = \Pi_{i=0}^{M-1} g^{f_i(\tau[1]) * L_i(\tau[0])} = \Pi_{i=0}^{M-1}\Pi_{j=0}^{N-1}f_{i, j} * U^{L_i(\tau[0])*\tau[1]^j}.
 */
-func Commit(p []fr.Element, srs *SRS, nbTasks ...int) (Digest, error) {
+func Commit(p []fr.Element, srs SRS, nbTasks ...int) (Digest, error) {
 	// Each compute node computes the commitment of its own polynomial
 	// and sends the commitment to the root node
 	// The root node computes the final commitment
@@ -195,7 +196,7 @@ New commitment is g^{F'(\tau[0])} = \Pi_{i=0}^{M-1} g^{f_i(y_0) * L_i(\tau[0])} 
 Proof that old commitment is consistent with new commitment:
 F(\tau[0], \tau[1]) - F(x, \tau[1]) / (\tau[0] - x) = h(x)
 */
-func Open(p []fr.Element, y fr.Element, srs *SRS, nbTasks ...int) (OpeningProof, []fr.Element, error) {
+func Open(p []fr.Element, y fr.Element, srs SRS, nbTasks ...int) (OpeningProof, []fr.Element, error) {
 	if len(p) == 0 || len(p) > len(srs.G1) {
 		return OpeningProof{}, nil, ErrInvalidPolynomialSize
 	}
@@ -283,7 +284,7 @@ type BatchOpeningProof struct {
 }
 
 // Verify verifies a KZG opening proof at a single point
-func Verify(commitment *Digest, proof *OpeningProof, point fr.Element, srs *SRS) error {
+func Verify(commitment *Digest, proof *OpeningProof, point fr.Element, srs SRS) error {
 	// [f(a)]G₁
 	var claimedValueG1Aff bn254.G1Jac
 	claimedValueG1Aff.FromAffine(&proof.ClaimedDigest)
@@ -335,7 +336,7 @@ func Verify(commitment *Digest, proof *OpeningProof, point fr.Element, srs *SRS)
 // * point is the point at which the polynomials are opened.
 // * digests is the list of committed polynomials to open, need to derive the challenge using Fiat Shamir.
 // * polynomials is the list of polynomials to open, they are supposed to be of the same size.
-func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr.Element, hf hash.Hash, srs *SRS) (BatchOpeningProof, [][]fr.Element, error) {
+func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr.Element, hf hash.Hash, srs SRS) (BatchOpeningProof, [][]fr.Element, error) {
 	// check for invalid sizes
 	nbDigests := len(digests)
 	if nbDigests != len(polynomials) {
@@ -511,7 +512,7 @@ func FoldProof(digests []Digest, batchOpeningProof *BatchOpeningProof, point fr.
 //
 // * digests list of digests on which opening proof is done
 // * batchOpeningProof proof of correct opening on the digests
-func BatchVerifySinglePoint(digests []Digest, batchOpeningProof *BatchOpeningProof, point fr.Element, hf hash.Hash, srs *SRS) error {
+func BatchVerifySinglePoint(digests []Digest, batchOpeningProof *BatchOpeningProof, point fr.Element, hf hash.Hash, srs SRS) error {
 	// fold the proof
 	foldedProof, foldedDigest, err := FoldProof(digests, batchOpeningProof, point, hf)
 	if err != nil {
@@ -529,7 +530,7 @@ func BatchVerifySinglePoint(digests []Digest, batchOpeningProof *BatchOpeningPro
 // * digests list of committed polynomials
 // * proofs list of opening proofs, one for each digest
 // * points the list of points at which the opening are done
-func BatchVerifyMultiPoints(digests []Digest, proofs []OpeningProof, points []fr.Element, srs *SRS) error {
+func BatchVerifyMultiPoints(digests []Digest, proofs []OpeningProof, points []fr.Element, srs SRS) error {
 	// check consistancy nb proogs vs nb digests
 	if len(digests) != len(proofs) || len(digests) != len(points) {
 		return ErrInvalidNbDigests

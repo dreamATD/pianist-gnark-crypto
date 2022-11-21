@@ -93,6 +93,10 @@ func (srs *SRS) WriteTo(w io.Writer) (int64, error) {
 	buf := make([]byte, 0)
 	buf = append(buf, G2AffineToBytes(srs.G2[0])...)
 	buf = append(buf, G2AffineToBytes(srs.G2[1])...)
+	size := len(srs.G1)
+	sizeBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(sizeBuf, uint64(size))
+	buf = append(buf, sizeBuf...)
 	buf = append(buf, G1AffineArrayToBytes(srs.G1)...)
 	n, err := w.Write(buf)
 	return int64(n), err
@@ -107,8 +111,16 @@ func (srs *SRS) ReadFrom(r io.Reader) (int64, error) {
 	if err != nil {
 		return int64(n), err
 	}
+
+	sizeBuf := make([]byte, 8)
+	n, err = r.Read(sizeBuf)
+	if err != nil {
+		return int64(n), err
+	}
+	size := binary.LittleEndian.Uint64(sizeBuf)
+
 	// G1
-	for {
+	for i := 0; i < int(size); i++ {
 		subBuf := make([]byte, 64)
 		x, err := r.Read(subBuf)
 		n += x
