@@ -75,7 +75,7 @@ func lagrangeCalc(t uint64, tau0 fr.Element, omega *fr.Element) fr.Element {
 // In production, a SRS generated through MPC should be used.
 //
 // implements io.ReaderFrom and io.WriterTo
-func NewSRS(size uint64, tau []*big.Int, domainGenY *fr.Element) (SRS, error) {
+func NewSRS(size uint64, tau []*big.Int, domainGenY *fr.Element) (*SRS, error) {
 	fmt.Println("NewSRS", size)
 	_, _, gen1Aff, gen2Aff := bn254.Generators()
 	tau0 := new(fr.Element).SetBigInt(tau[0])
@@ -105,7 +105,7 @@ func NewSRS(size uint64, tau []*big.Int, domainGenY *fr.Element) (SRS, error) {
 	}
 	g1s := bn254.BatchScalarMultiplicationG1(&gen1Aff, alphas)
 	copy(srs.G1, g1s)
-	return srs, nil
+	return &srs, nil
 }
 
 /*
