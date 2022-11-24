@@ -8,7 +8,7 @@ require (
 	github.com/mmcloughlin/addchain v0.4.0
 	github.com/spf13/cobra v1.5.0
 	github.com/stretchr/testify v1.8.0
-	github.com/sunblaze-ucb/simpleMPI v0.0.0-20221124005545-f5f10c1e9ea4
+	github.com/sunblaze-ucb/simpleMPI v0.0.0-20221124064852-e52f6cdbea54
 	golang.org/x/crypto v0.1.0
 	golang.org/x/sys v0.1.0
 )
