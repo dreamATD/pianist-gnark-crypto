@@ -31,12 +31,12 @@ import (
 )
 
 // testSRS re-used accross tests of the KZG scheme
-var testSRS []*SRS
+var testSRS []SRS
 
 const srsSize = 230
 
 func init() {
-	testSRS = make([]*SRS, mpi.WorldSize)
+	testSRS = make([]SRS, mpi.WorldSize)
 	for i := 0; i < int(mpi.WorldSize); i++ {
 		var err error
 		testSRS[i], err = newSRS(ecc.NextPowerOfTwo(srsSize), []*big.Int{big.NewInt(42), big.NewInt(int64(27))}, uint64(i))
@@ -46,7 +46,7 @@ func init() {
 	}
 }
 
-func newSRS(size uint64, tau []*big.Int, num uint64) (*SRS, error) {
+func newSRS(size uint64, tau []*big.Int, num uint64) (SRS, error) {
 
 	_, _, gen1Aff, gen2Aff := bn254.Generators()
 	t := num
@@ -79,7 +79,7 @@ func newSRS(size uint64, tau []*big.Int, num uint64) (*SRS, error) {
 	}
 	g1s := bn254.BatchScalarMultiplicationG1(&gen1Aff, alphas)
 	copy(srs.G1[1:], g1s)
-	return &srs, nil
+	return srs, nil
 }
 
 func TestDividePolyByXminusA(t *testing.T) {
