@@ -4,7 +4,6 @@ import (
 	"errors"
 	"hash"
 	"math/big"
-	"sync"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/ecc/bn254"
@@ -356,16 +355,11 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 	// compute the purported values
 	claimedValues := make([]fr.Element, len(polynomials))
 	claimedDigests := make([]bn254.G1Affine, len(polynomials))
-	var wg sync.WaitGroup
-	wg.Add(len(polynomials))
 	for i := 0; i < len(polynomials); i++ {
-		go func(_i int) {
-			claimedValues[_i] = eval(polynomials[_i], point)
-			var claimedValueBigInt big.Int
-			claimedValues[_i].ToBigIntRegular(&claimedValueBigInt)
-			claimedDigests[_i].ScalarMultiplication(&srs.G1[0], &claimedValueBigInt)
-			wg.Done()
-		}(i)
+		claimedValues[i] = eval(polynomials[i], point)
+		var claimedValueBigInt big.Int
+		claimedValues[i].ToBigIntRegular(&claimedValueBigInt)
+		claimedDigests[i].ScalarMultiplication(&srs.G1[0], &claimedValueBigInt)
 	}
 	// derive the challenge γ, binded to the point and the commitments
 	gamma, err := deriveGamma(point, digests, hf, false)
@@ -375,17 +369,12 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 
 	// ∑ᵢγⁱf(a)
 	var fY fr.Element
-	chSumGammai := make(chan struct{}, 1)
-	go func() {
-		// wait for polynomial evaluations to be completed (res.ClaimedValues)
-		wg.Wait()
-		fY = claimedValues[nbDigests-1]
-		for i := nbDigests - 2; i >= 0; i-- {
-			fY.Mul(&fY, &gamma).
-				Add(&fY, &claimedValues[i])
-		}
-		close(chSumGammai)
-	}()
+	// wait for polynomial evaluations to be completed (res.ClaimedValues)
+	fY = claimedValues[nbDigests-1]
+	for i := nbDigests - 2; i >= 0; i-- {
+		fY.Mul(&fY, &gamma).
+			Add(&fY, &claimedValues[i])
+	}
 
 	// compute ∑ᵢγⁱfᵢ
 	// note: if we are willing to paralellize that, we could clone the poly and scale them by
@@ -403,8 +392,6 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 		})
 		acc.Mul(&acc, &gamma)
 	}
-
-	<-chSumGammai
 
 	// compute H
 	h := dividePolyByXminusA(foldedPolynomials, fY, point)
