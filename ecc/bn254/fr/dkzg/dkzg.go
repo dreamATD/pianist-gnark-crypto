@@ -43,7 +43,7 @@ func eval(p []fr.Element, point fr.Element) fr.Element {
 }
 
 func init() {
-	mpi.WorldInit("/home/tianyi/gnark/examples/piano/ip.txt", "/home/tianyi/.ssh/id_ed25519", "tianyi")
+	mpi.WorldInit("_", "_", "_")
 }
 
 func lagrangeCalc(t uint64, tau0 fr.Element, omega *fr.Element) fr.Element {

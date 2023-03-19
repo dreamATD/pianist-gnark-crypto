@@ -17,6 +17,7 @@
 package fft
 
 import (
+	"math/big"
 	"math/bits"
 	"runtime"
 
@@ -82,6 +83,59 @@ func (domain *Domain) FFT(a []fr.Element, decimation Decimation, coset ...bool) 
 	default:
 		panic("not implemented")
 	}
+}
+
+// FFTPart computes a part of FFT.
+func (domain *Domain) FFTPart(f []fr.Element, decimation Decimation, extra_factor fr.Element, coset ...bool) []fr.Element {
+
+	numCPU := uint64(runtime.NumCPU())
+
+	a := make([]fr.Element, len(f))
+	copy(a, f)
+
+	_coset := false
+	if len(coset) > 0 {
+		_coset = coset[0]
+	}
+
+	// if coset != 0, scale by coset table
+	if _coset {
+		scale := func(cosetTable []fr.Element) {
+			parallel.Execute(len(a), func(start, end int) {
+				var e fr.Element
+				e.Exp(extra_factor, big.NewInt(int64(start)))
+				for i := start; i < end; i++ {
+					a[i].Mul(&a[i], &cosetTable[i]).Mul(&a[i], &e)
+					e.Mul(&e, &extra_factor)
+				}
+			})
+		}
+		if decimation == DIT {
+			panic("DIT not implemented")
+
+		} else {
+			scale(domain.CosetTable)
+		}
+	} else {
+		panic("no coset not implemented")
+	}
+
+	// find the stage where we should stop spawning go routines in our recursive calls
+	// (ie when we have as many go routines running as we have available CPUs)
+	maxSplits := bits.TrailingZeros64(ecc.NextPowerOfTwo(numCPU))
+	if numCPU <= 1 {
+		maxSplits = -1
+	}
+
+	switch decimation {
+	case DIF:
+		difFFT(a, domain.Twiddles, 0, maxSplits, nil)
+	case DIT:
+		ditFFT(a, domain.Twiddles, 0, maxSplits, nil)
+	default:
+		panic("not implemented")
+	}
+	return a
 }
 
 // FFTInverse computes (recursively) the inverse discrete Fourier transform of a and stores the result in a

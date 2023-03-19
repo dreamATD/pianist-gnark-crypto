@@ -226,6 +226,88 @@ func TestFFT(t *testing.T) {
 
 }
 
+func TestFFTPart(t *testing.T) {
+	const maxSize = 1 << 10
+
+	domainWithPrecompute := NewDomain(maxSize)
+	domainWithPrecompute2 := NewDomain(maxSize * 4)
+
+	parameters := gopter.DefaultTestParameters()
+	parameters.MinSuccessfulTests = 5
+
+	properties := gopter.NewProperties(parameters)
+
+	properties.Property("FFTPart should be consistent with dual basis", prop.ForAll(
+
+		// checks that a random evaluation of a dual function eval(gen**ithpower) is consistent with the FFT result
+		func(ithpower int) bool {
+
+			pol := make([]fr.Element, maxSize)
+			backupPol := make([]fr.Element, maxSize)
+
+			for i := 0; i < maxSize; i++ {
+				pol[i].SetRandom()
+			}
+			copy(backupPol, pol)
+
+			var extraFactor fr.Element
+			extraFactor.SetRandom()
+			extraFactor.SetOne()
+			pol = domainWithPrecompute.FFTPart(pol, DIF, extraFactor, true)
+			BitReverse(pol)
+
+			sample := domainWithPrecompute.Generator
+			sample.Exp(sample, big.NewInt(int64(ithpower))).
+				Mul(&sample, &domainWithPrecompute.FrMultiplicativeGen).
+				Mul(&sample, &extraFactor)
+
+			eval := evaluatePolynomial(backupPol, sample)
+
+			return eval.Equal(&pol[ithpower])
+
+		},
+		gen.IntRange(0, maxSize-1),
+	))
+
+	properties.Property("(DIF FFTPart, DIF FFTPart, DIF FFTPart, DIF FFTPart) == DIF FFT2", prop.ForAll(
+
+		func() bool {
+
+			poly := make([]fr.Element, maxSize)
+			want := make([]fr.Element, maxSize * 4)
+
+			for i := 0; i < maxSize; i++ {
+				poly[i].SetRandom()
+			}
+			copy(want, poly)
+
+			domainWithPrecompute2.FFT(want, DIF, true)
+
+			// Compute omega_(4N)^0, omega_(4N)^2, omega_(4N)^1, omega_(4N)^3
+			factors := make([]fr.Element, 4)
+			factors[0].SetOne()
+			for i := 1; i < 4; i++ {
+				factors[i].Mul(&factors[i-1], &domainWithPrecompute2.Generator)
+			}
+			BitReverse(factors)
+
+			got := []fr.Element{}
+			for i := 0; i < 4; i++ {
+				got = append(got, domainWithPrecompute.FFTPart(poly, DIF, factors[i], true)...)
+			}
+
+			check := true
+			for i := 0; i < len(got); i++ {
+				check = check && (got[i] == want[i])
+			}
+			return check
+		},
+	))
+
+	properties.TestingRun(t, gopter.ConsoleReporter(false))
+
+}
+
 // --------------------------------------------------------------------
 // benches
 func BenchmarkBitReverse(b *testing.B) {
