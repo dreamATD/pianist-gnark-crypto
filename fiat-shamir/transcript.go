@@ -16,9 +16,7 @@ package fiatshamir
 
 import (
 	"errors"
-	"fmt"
 	"hash"
-	"runtime/debug"
 )
 
 // errChallengeNotFound is returned when a wrong challenge name is provided.
@@ -111,8 +109,6 @@ func (t *Transcript) ComputeChallenge(challengeID string) ([]byte, error) {
 	// write the previous challenge if it's not the first challenge
 	if challenge.position != 0 {
 		if t.previous == nil || (t.previous.position != challenge.position-1) {
-
-			fmt.Println(string(debug.Stack()))
 			return nil, errPreviousChallengeNotComputed
 		}
 		if _, err := t.h.Write(t.previous.value[:]); err != nil {

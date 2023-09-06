@@ -18,10 +18,8 @@ package kzg
 
 import (
 	"errors"
-	"fmt"
 	"hash"
 	"math/big"
-	"runtime/debug"
 	"sync"
 
 	"github.com/consensys/gnark-crypto/ecc"
@@ -122,7 +120,6 @@ type BatchOpeningProof struct {
 func Commit(p []fr.Element, srs *SRS, nbTasks ...int) (Digest, error) {
 
 	if len(p) == 0 || len(p) > len(srs.G1) {
-		fmt.Println(string(debug.Stack()))
 		return Digest{}, ErrInvalidPolynomialSize
 	}
 
@@ -143,7 +140,6 @@ func Commit(p []fr.Element, srs *SRS, nbTasks ...int) (Digest, error) {
 // fft.Domain Cardinality must be larger than p.Degree()
 func Open(p []fr.Element, point fr.Element, srs *SRS) (OpeningProof, error) {
 	if len(p) == 0 || len(p) > len(srs.G1) {
-		fmt.Println(string(debug.Stack()))
 		return OpeningProof{}, ErrInvalidPolynomialSize
 	}
 
@@ -237,7 +233,6 @@ func BatchOpenSinglePoint(polynomials [][]fr.Element, digests []Digest, point fr
 	largestPoly := -1
 	for _, p := range polynomials {
 		if len(p) == 0 || len(p) > len(srs.G1) {
-			fmt.Println(string(debug.Stack()))
 			return BatchOpeningProof{}, ErrInvalidPolynomialSize
 		}
 		if len(p) > largestPoly {
