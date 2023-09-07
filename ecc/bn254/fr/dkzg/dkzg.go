@@ -1,3 +1,17 @@
+// Copyright 2023 Tianyi Liu and Tiancheng Xie
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package dkzg
 
 import (
@@ -106,9 +120,9 @@ func NewSRS(size uint64, tau []*big.Int, domainGenY *fr.Element) (*SRS, error) {
 
 /*
 The distributed commit algorithm computes the following:
-	1. Each node has a polynomial f_i(y).
-	2. The commit algorithm commits to: F(x, y) = \sum_{i=0}^{M-1} f_i(y) * L_i(x), where L_i(x) is the Lagrange polynomial of i.
-	3. The commitment is g^{F(\tau[0], \tau[1])} = \Pi_{i=0}^{M-1} g^{f_i(\tau[1]) * L_i(\tau[0])} = \Pi_{i=0}^{M-1}\Pi_{j=0}^{N-1}f_{i, j} * U^{L_i(\tau[0])*\tau[1]^j}.
+ 1. Each node has a polynomial f_i(y).
+ 2. The commit algorithm commits to: F(x, y) = \sum_{i=0}^{M-1} f_i(y) * L_i(x), where L_i(x) is the Lagrange polynomial of i.
+ 3. The commitment is g^{F(\tau[0], \tau[1])} = \Pi_{i=0}^{M-1} g^{f_i(\tau[1]) * L_i(\tau[0])} = \Pi_{i=0}^{M-1}\Pi_{j=0}^{N-1}f_{i, j} * U^{L_i(\tau[0])*\tau[1]^j}.
 */
 func Commit(p []fr.Element, srs *SRS, nbTasks ...int) (Digest, error) {
 	// Each compute node computes the commitment of its own polynomial
