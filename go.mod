@@ -9,8 +9,8 @@ require (
 	github.com/spf13/cobra v1.5.0
 	github.com/stretchr/testify v1.8.0
 	github.com/sunblaze-ucb/simpleMPI v0.0.0-20221116051826-70e801eec087
-	golang.org/x/crypto v0.1.0
-	golang.org/x/sys v0.1.0
+	golang.org/x/crypto v0.17.0
+	golang.org/x/sys v0.15.0
 )
 
 require (
